@@ -123,7 +123,7 @@ export const register: Register = (on) => {
     try {
       const author = await ownName($)
       const line = await post($, author, text)
-      const mentions = await deliverMentions($, author, text, line)
+      const { text: mentions } = await deliverMentions($, author, text, line)
       // Every panel shows who this session last talked to.
       // Best effort: the post is saved whatever this does.
       await (async () => publishStatus($, { post: { at: await $.clock.now(), to: parseMentions(text) } }))().catch(() => {})

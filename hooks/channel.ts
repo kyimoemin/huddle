@@ -119,20 +119,23 @@ export async function ownName($: $): Promise<string> {
   return (await $.session.cwd()).split('/').filter(Boolean).at(-1) ?? 'session'
 }
 
+/** What became of a post's mentions: one line for the poster (empty with none), and the names no message reached. */
+export type Delivery = { text: string; undelivered: string[] }
+
 /**
  * Sends each session a post @mentions a message saying so, and toasts what
- * did not reach anyone. Returns one line for the poster; empty with no mentions.
+ * did not reach anyone.
  */
-export async function deliverMentions($: $, author: string, text: string, line: string, isPerson = false): Promise<string> {
+export async function deliverMentions($: $, author: string, text: string, line: string, isPerson = false): Promise<Delivery> {
   const names = parseMentions(text)
-  if (names.length === 0) return ''
+  if (names.length === 0) return { text: '', undelivered: [] }
   let rows: SessionRow[]
   try {
     rows = await sessions($)
   } catch (error) {
     const problem = `huddle: mentions not delivered: ${errorText(error)}`
     $.ui.toast(problem)
-    return problem
+    return { text: problem, undelivered: names }
   }
   // The person posting from this session's panel can mention this session too.
   const { targets, unknown } = resolveMentions(names, rows, await $.session.id(), isPerson)
@@ -161,7 +164,8 @@ export async function deliverMentions($: $, author: string, text: string, line: 
   ]
   if (problems.length > 0) $.ui.toast(`huddle: ${problems.join('; ')}`)
   const parts = [reached.length > 0 ? `notified ${[...new Set(reached)].join(', ')}` : '', ...problems].filter(Boolean)
-  return parts.join('; ')
+  const undelivered = [...new Set([...unknown, ...sent.filter((s) => !s.ok).map((s) => s.name)])]
+  return { text: parts.join('; '), undelivered }
 }
 
 /** The channel folder: `$HUDDLE_DIR` when set (for testing), else ~/.claude/huddle. */

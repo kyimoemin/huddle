@@ -22,8 +22,9 @@ const BELOW_FEED = 3
 const MAX_POST_ROWS = 3
 /** Columns of the pane the post box's own chrome takes (its prompt mark and `post` label). */
 const POST_CHROME = 8
-/** The session list's header row, and the divider and day header under the list. */
+/** The session list's header row. */
 const HEADER_ROWS = 1
+/** The divider and day header between the list and the feed. */
 const DIVIDER_ROWS = 2
 /** Rows a long post shows until opened, plus its `more` row. */
 const COLLAPSED_ROWS = 3
@@ -282,24 +283,47 @@ async function setPostBox($: $, text: string): Promise<void> {
   await noteTyping($, text)
 }
 
-/** Shows one line under the feed, which clears itself after NOTICE_MS unless replaced. */
-async function say($: $, text: string): Promise<void> {
+/**
+ * Shows one line under the feed until another replaces it; with `fades`, it
+ * also clears itself after NOTICE_MS (a newer notice, even the same words, is
+ * left alone).
+ */
+async function say($: $, text: string, fades = false): Promise<void> {
+  const shown = ++notices
   await update($, notice, () => text)
-  if (text === '') return
+  if (!fades || text === '') return
   $.clock.after(NOTICE_MS, () => {
-    void update($, notice, (shown) => (shown === text ? '' : shown)).catch(() => {})
+    if (notices === shown) void update($, notice, () => '').catch(() => {})
   })
 }
+let notices = 0
 
 /**
  * The notice for a post's undelivered mentions: one short line naming them
  * (`⚠ @a, @b not notified`); the full reasons went to a toast.
  */
-export function mentionNotice(problems: readonly string[]): string {
-  if (problems.length === 0) return ''
-  const names = [...new Set(problems.flatMap((problem) => /^@[^\s:(]+/.exec(problem)?.[0] ?? []))]
-  return names.length > 0 ? `⚠ ${names.join(', ')} not notified` : '⚠ mentions not delivered'
+export function mentionNotice(undelivered: readonly string[]): string {
+  return undelivered.length > 0 ? `⚠ ${undelivered.map((name) => `@${name}`).join(', ')} not notified` : ''
 }
+
+/**
+ * How a post draws in the feed `columns` wide: cut to about COLLAPSED_ROWS
+ * rows unless opened (`isLong`, with an ellipsis), and the rows it takes,
+ * its `more` row included. The cut leaves slack for word wrap and wide icons.
+ */
+export function postLayout(prefix: string, body: string, columns: number, isOpen: boolean): { body: string; isLong: boolean; rows: number } {
+  const width = Math.max(1, columns)
+  const length = [...prefix].length + [...body].length
+  const wraps = Math.max(1, Math.ceil(length / width))
+  if (wraps <= COLLAPSED_ROWS) return { body, isLong: false, rows: wraps }
+  if (isOpen) return { body, isLong: true, rows: wraps + 1 }
+  const slack = Math.ceil(width / 5)
+  const room = Math.max(0, COLLAPSED_ROWS * (width - slack) - [...prefix].length - 1)
+  return { body: `${[...body].slice(0, room).join('')}…`, isLong: true, rows: COLLAPSED_ROWS + 1 }
+}
+
+/** What a post's time and author take before its body. */
+const postPrefix = (time: string, author: string) => `${time} ${author} `
 
 /** An author's colour, fixed by name. */
 export function authorColor(name: string): string {
@@ -314,9 +338,8 @@ export async function submit($: $, text: string): Promise<void> {
   await setPostBox($, '')
   try {
     const line = await post($, 'you', text)
-    const mentions = await deliverMentions($, 'you', text, line, true)
-    const problems = mentions.split('; ').filter((part) => part !== '' && !part.startsWith('notified '))
-    await say($, mentionNotice(problems))
+    const { undelivered } = await deliverMentions($, 'you', text, line, true)
+    await say($, mentionNotice(undelivered), true)
   } catch (error) {
     await setPostBox($, text)
     await say($, `Not posted: ${errorText(error)}`)
@@ -336,14 +359,17 @@ export function parseRow(line: string): Row {
  * The newest lines that fit `rows` rows `columns` wide, oldest first; each
  * line counts the rows it wraps to.
  */
-export function fitLines(lines: readonly string[], rows: number, columns: number, isOpen: (line: string) => boolean = () => true): string[] {
-  const width = Math.max(1, columns)
+export function fitLines(
+  lines: readonly string[],
+  rows: number,
+  columns: number,
+  rowsOf: (line: string) => number = (line) => Math.max(1, Math.ceil([...line].length / Math.max(1, columns))),
+): string[] {
   const kept: string[] = []
   let used = 0
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!
-    const wraps = Math.max(1, Math.ceil([...line].length / width))
-    const cost = wraps > COLLAPSED_ROWS && !isOpen(line) ? COLLAPSED_ROWS + 1 : wraps
+    const cost = rowsOf(line)
     if (used + cost > rows && kept.length > 0) break
     kept.unshift(line)
     used += cost
@@ -392,7 +418,14 @@ export function registerPanel(on: On): void {
     const hidden = isListOpen ? everyone.length - listed.length : 0
     const listRows = HEADER_ROWS + listed.length + (hidden > 0 ? 1 : 0) + DIVIDER_ROWS
     const columns = e.props.bodyColumns
-    const shown = fitLines(lines, Math.max(1, bodyRows - BELOW_FEED - (rows - 1) - listRows), columns, (line) => opened.has(line))
+    const authorOf = (name: string) => [authorIcon(name, everyone), name].filter(Boolean).join(' ')
+    // One layout per line, so the room counted is the room drawn; a line that is no post is drawn whole.
+    const layoutOf = (line: string) => {
+      const row = parseRow(line)
+      if ('raw' in row) return { rows: Math.max(1, Math.ceil([...row.raw].length / Math.max(1, columns))) }
+      return postLayout(postPrefix(row.time, authorOf(row.name)), row.body, columns, opened.has(line))
+    }
+    const shown = fitLines(lines, Math.max(1, bodyRows - BELOW_FEED - (rows - 1) - listRows), columns, (line) => layoutOf(line).rows)
     const busy = everyone.filter((peer) => peer.status === 'busy').length
     const talks = conversations(everyone, now)
     const header = [`Sessions ${everyone.length}`, busy > 0 ? `${busy} busy` : '', talks.size > 0 ? `${talks.size} talking` : '']
@@ -413,6 +446,7 @@ export function registerPanel(on: On): void {
           const { percent, tokens, estimated } = peer.context ?? {}
           const talk = talks.get(peer.sessionId)
           const isFull = percent !== undefined && percent >= CONTEXT_WARN
+          const effort = effortBadge(peer.effort)
           return (
             <Box key={`peer-${peer.sessionId}`} flexDirection="row" gap={1}>
               <Text color={isBusy ? 'warning' : undefined} dimColor={!isBusy}>
@@ -465,11 +499,7 @@ export function registerPanel(on: On): void {
               )}
               </Box>
               <Box width={EFFORT_COLUMNS} flexShrink={0} justifyContent="flex-end">
-                {effortBadge(peer.effort) && (
-                  <Text dimColor>
-                    {effortBadge(peer.effort)}
-                  </Text>
-                )}
+                {effort && <Text dimColor>{effort}</Text>}
               </Box>
               <Box width={BAR_COLUMNS} flexShrink={0}>
                 {percent !== undefined ? (
@@ -518,12 +548,9 @@ export function registerPanel(on: On): void {
                 </Text>
               )
             }
-            const author = [authorIcon(row.name, everyone), row.name].filter(Boolean).join(' ')
-            const isLong = Math.ceil([...line].length / Math.max(1, columns)) > COLLAPSED_ROWS
+            const author = authorOf(row.name)
             const isOpen = opened.has(line)
-            // Collapsed, the body is cut to what COLLAPSED_ROWS rows hold beside the time and author.
-            const room = COLLAPSED_ROWS * Math.max(1, columns) - [...`${row.time} ${author} `].length - 1
-            const body = isLong && !isOpen ? `${[...row.body].slice(0, Math.max(0, room)).join('')}…` : row.body
+            const { body, isLong } = postLayout(postPrefix(row.time, author), row.body, columns, isOpen)
             return (
               <Box key={`line-${i}`} flexDirection="column" marginBottom="sm">
                 <Text wrap="wrap">

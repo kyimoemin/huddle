@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { ago, authorColor, barFill, mentionNotice, conversations, fitLines, parseRow, postRowsFor, sortPeers, splitMentions } from './panel'
+import { ago, authorColor, barFill, mentionNotice, postLayout, conversations, fitLines, parseRow, postRowsFor, sortPeers, splitMentions } from './panel'
 
 const WHOLE = { isStdoutTruncated: false, isStderrTruncated: false }
 const START = { cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true } as const
@@ -634,10 +634,35 @@ test('the talking arrow goes once the post is ten minutes old, with no other cha
 
 test('mentionNotice names the undelivered mentions in one short line', () => {
   expect(mentionNotice([])).toBe('')
-  expect(mentionNotice(['@ghost: no running session has that name', '@a (classifier gave no verdict): not delivered', '@a (x): not delivered'])).toBe(
-    '⚠ @ghost, @a not notified',
-  )
-  expect(mentionNotice(['huddle: mentions not delivered: boom'])).toBe('⚠ mentions not delivered')
+  expect(mentionNotice(['ghost', 'a'])).toBe('⚠ @ghost, @a not notified')
+})
+
+test('postLayout cuts a long post to its first rows and counts its more row', () => {
+  const short = postLayout('14:32 a ', 'hi', 40, false)
+  expect(short).toEqual({ body: 'hi', isLong: false, rows: 1 })
+  // Just past three rows by length: cut, with an ellipsis and a more row.
+  const long = postLayout('14:32 a ', 'x'.repeat(120), 40, false)
+  expect(long.isLong).toBe(true)
+  expect(long.rows).toBe(4)
+  expect(long.body.endsWith('…')).toBe(true)
+  expect([...long.body].length).toBeLessThan(120)
+  expect(postLayout('14:32 a ', 'x'.repeat(120), 40, true)).toEqual({ body: 'x'.repeat(120), isLong: true, rows: 5 })
+})
+
+test('an error notice stays; a repeated mention notice gets its own half minute', async ($, on) => {
+  const clock = mock.clock(on)
+  world(on, true)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  await ui.input({ key: 'post', text: '@ghost one' })
+  await clock.advance(25_000)
+  await ui.input({ key: 'post', text: '@ghost two' })
+  await clock.advance(6_000)
+  expect(await ui.find({ type: 'Text', text: '⚠ @ghost not notified' })).toBeDefined()
+  await clock.advance(25_000)
+  expect(await ui.find({ type: 'Text', text: '⚠ @ghost not notified' })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('each author keeps one colour', () => {
