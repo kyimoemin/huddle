@@ -53,11 +53,12 @@ Not in scope: real-time group chat between agents, sessions on other machines, e
 | `HUDDLE_DIR` env | overrides `~/.claude/huddle` | For testing without touching the real channel |
 | @mention delivery | After the append, parse `@name`, resolve it case-insensitively through `claude agents --json`, and `$.session.send({ to: { sessionId }, text })` to every match | A shared name reaches every session that has it. This session and `@you` are skipped. Unknown names and failed deliveries go in the tool result and a toast; the post stands either way. The sessions list is cached 10s and also gives the author's name |
 | Panel | `$.ui.open({ id: 'huddle', title: 'Huddle' })` plus a `ui.render` hook on `Pane` | Shows the feed (the tail of today's file), a post box and the session list |
-| Live feed | `$.clock.every(2000)` checks the day file's `mtimeMs` and redraws when it changes | There is no fs watch API; polling one stat call is cheap |
+| Live feed | `$.clock.every(2000)` checks the day file's `mtimeMs` and re-reads it only when that or the day changed | There is no fs watch API, so each tick is one stat call. It runs only while the pane is open: the first tick after `$.ui.panes()` stops listing it cancels the timer, and `session.start` restarts it after a reload |
+| Post box | `Input` with `onInput` tracking a `draft` atom and `onSubmit` posting as `you` | Clearing `draft` after a post empties the field. Mention problems and failures show as one dim line under the feed |
 | Session list | `$.tool.call({ tool: 'ListAgents' })`, the same list the model sees. Fallback: `$.process.run(["claude", "agents", ...])` | `$.tool.call` exists in the API. Whether ListAgents can be called this way is still to be confirmed |
 | Stop | `$.process.run(["claude", "stop", id])` | **To verify first:** which id `claude stop` accepts (ListAgents shows short refs like `[3d3fa0]`) |
 | `/huddle` command | `$.command.register` and a `command.run` hook | Opens the panel |
-| Panel state | `atom`s declared in `types/index.d.ts` | Feed lines, last mtime, session list |
+| Panel state | `atom`s declared in `types/index.d.ts` | `feed` (day, lines, mtime; shape `feed-1`), `draft`, `notice`. The session list comes in step 6 |
 
 ## File layout
 
@@ -65,8 +66,11 @@ Not in scope: real-time group chat between agents, sessions on other machines, e
 huddle/
   .claude-plugin/plugin.json      name, version, description, "types"
   hooks/hooks.json                { "modules": ["./register.tsx"] }
-  hooks/register.tsx              everything above
-  hooks/huddle.ts                path, format, append, tail helpers (pure, testable)
+  hooks/register.tsx              tools, guard hooks, prompt section; the one session.start
+  hooks/channel.ts                post, read, sessions, mentions (on $)
+  hooks/panel.tsx                 /huddle, the pane, polling
+  hooks/guard.ts                  Bash and path rules (pure)
+  hooks/huddle.ts                 path, format, append, tail, mention helpers (pure, testable)
   types/index.d.ts                PluginState for the panel atoms
   hooks/huddle.test.ts           claude plugin test
   README.md
@@ -88,7 +92,7 @@ huddle/
 2. ✅ The `post` and `read` tools and the `prompt.compose` section. At this point sessions can already use the channel with no UI.
 3. ✅ The guard hook and `uappnd`.
 4. ✅ @mention delivery through `$.session.send`.
-5. The panel: feed and post box.
+5. ✅ The panel: feed and post box.
 6. The panel's session list and Stop button, after open question 2 is settled.
 
 ## Developing it

@@ -25,6 +25,8 @@ function engine(
   on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : e.name === 'HUDDLE_DIR' ? huddleDirEnv : undefined }))
   on('session.id', () => ({ value: 'sid' }))
   on('session.cwd', () => ({ value: '/Users/me/Projects/huddle' }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.panes', () => ({ value: [] }))
   on('process.run', (_, e) => {
     runs.push(e.argv)
     if (e.argv[0] === 'claude') {

@@ -1,5 +1,6 @@
 {
   "name": "huddle",
   "version": "0.1.0",
-  "description": "One shared, append-only chat channel for every local Claude Code session, with a panel to read, post and see sessions."
+  "description": "One shared, append-only chat channel for every local Claude Code session, with a panel to read, post and see sessions.",
+  "types": "./types/index.d.ts"
 }

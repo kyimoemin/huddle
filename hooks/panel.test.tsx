@@ -1,0 +1,194 @@
+import { expect, mock, test } from 'claude-code/testing'
+import type { On } from 'claude-code'
+import { fitLines, parseRow } from './panel.tsx'
+
+const WHOLE = { isStdoutTruncated: false, isStderrTruncated: false }
+const START = { cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true } as const
+const HUDDLE = {
+  command: 'huddle',
+  args: '',
+  origin: { kind: 'composer' },
+  presentation: { isFullscreen: true, columns: 120 },
+} as const
+const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
+
+const PANE = (surface: (typeof SURFACES)[number]) =>
+  ({
+    plugin: 'huddle',
+    surface,
+    component: 'Pane',
+    requestId: 'huddle',
+    props: {
+      title: '#huddle',
+      isFocused: true,
+      bodyColumns: 60,
+      placement: 'dock',
+      scroll: { offset: 0, bodyRows: 20 },
+      view: {},
+    },
+  }) as const
+
+/**
+ * The engine beneath the panel. Today's file holds `day.lines` with mtime
+ * `day.mtimeMs` (0: no file). The pane is open once `ui.open` ran, until
+ * `world.isOpen` is set false. Returns what the test reads and changes.
+ */
+function world(on: On) {
+  const state = {
+    lines: [] as string[],
+    mtimeMs: 0,
+    isOpen: false,
+    stats: 0,
+    appended: [] as string[],
+    sent: [] as string[],
+  }
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__huddle__${e.name}` } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
+  on('session.id', () => ({ value: 'sid' }))
+  on('session.cwd', () => ({ value: '/Users/me/Projects/huddle' }))
+  on('ui.open', () => {
+    state.isOpen = true
+    return { value: { isPlaced: true } }
+  })
+  on('ui.panes', () => ({
+    value: state.isOpen ? [{ id: 'huddle', title: '#huddle', isShown: true, isFocused: false, isPlaced: true }] : [],
+  }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('fs.stat', (_, e) => {
+    if (!e.path.endsWith('.md')) return { deny: `ENOENT: ${e.path}` }
+    state.stats++
+    return state.mtimeMs === 0
+      ? { deny: `ENOENT: ${e.path}` }
+      : { value: { kind: 'file', size: 1, mtimeMs: state.mtimeMs, isLink: false } }
+  })
+  on('process.run', (_, e) => {
+    const [cmd] = e.argv
+    const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', ...WHOLE } })
+    if (cmd === 'claude') {
+      return out(JSON.stringify([{ sessionId: 'sid', name: 'huddle-5a' }, { sessionId: 's1', name: 'coachcard-1e' }]))
+    }
+    if (cmd === '/usr/bin/tail') return state.mtimeMs === 0 ? out('', 1) : out(state.lines.map((l) => `${l}\n`).join(''))
+    if (cmd === '/bin/sh') {
+      const line = e.argv[4]!
+      state.appended.push(line)
+      state.lines.push(line)
+      state.mtimeMs++
+      return out('')
+    }
+    return out('', 1)
+  })
+  on('session.send', (_, e) => {
+    state.sent.push(e.to)
+    return { isDelivered: true }
+  })
+  return state
+}
+
+test('a feed line splits into time, name and text', () => {
+  expect(parseRow('- 14:32 **coachcard-1e**: QA is **green**')).toEqual({
+    time: '14:32',
+    name: 'coachcard-1e',
+    body: 'QA is **green**',
+  })
+  expect(parseRow('something else')).toEqual({ raw: 'something else' })
+})
+
+test('fitLines keeps the newest lines that fit, counting wrapped rows', () => {
+  const lines = ['a'.repeat(25), 'b', 'c'.repeat(10)]
+  expect(fitLines(lines, 2, 10)).toEqual(['b', 'c'.repeat(10)])
+  expect(fitLines(lines, 5, 10)).toEqual(lines)
+  // The newest line shows even when it alone is taller than the room.
+  expect(fitLines(['x'.repeat(100)], 2, 10)).toEqual(['x'.repeat(100)])
+  expect(fitLines([], 5, 10)).toEqual([])
+})
+
+test("/huddle opens the pane showing today's posts, on every surface", async ($, on) => {
+  const day = world(on)
+  day.lines = ['- 14:32 **coachcard-1e**: QA is green', '- 14:35 **you**: @coachcard-1e which tests?']
+  day.mtimeMs = 1
+  await $.session.start(START)
+
+  const ran = await $.command.run(HUDDLE)
+  expect(String(ran.text)).toContain('#huddle opened')
+  expect(day.isOpen).toBe(true)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(PANE(surface))
+    expect(await ui.find({ type: 'Text', text: /QA is green/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /which tests\?/ })).toBeDefined()
+    expect((await ui.find({ key: 'post' }))?.type).toBe('Input')
+    await ui.unmount()
+  }
+})
+
+test('an empty day says so', async ($, on) => {
+  world(on)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+
+  const ui = await $.ui.mount(PANE('terminal'))
+  expect((await ui.find({ type: 'Text', text: /No posts today/ }))?.text).toContain('@name mentions a session')
+  await ui.unmount()
+})
+
+test('the post box posts as you, delivers mentions, clears and shows the new line', async ($, on) => {
+  const day = world(on)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount(PANE(surface))
+    await ui.input({ key: 'post', text: `@coachcard-1e ping from ${surface}`, kind: 'change' })
+    await ui.input({ key: 'post', text: `@coachcard-1e ping from ${surface}` })
+
+    expect(day.appended.at(-1)).toMatch(new RegExp(`^- \\d\\d:\\d\\d \\*\\*you\\*\\*: @coachcard-1e ping from ${surface}$`))
+    expect(await ui.find({ type: 'Text', text: new RegExp(`ping from ${surface}`) })).toBeDefined()
+    expect((await ui.find({ key: 'post' }))?.props.value).toBe('')
+    await ui.unmount()
+  }
+  expect(day.sent.length).toBe(2)
+})
+
+test('an unknown mention shows under the feed; an empty post does nothing', async ($, on) => {
+  const day = world(on)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+
+  await ui.input({ key: 'post', text: '   ' })
+  expect(day.appended).toEqual([])
+
+  await ui.input({ key: 'post', text: '@ghost hello' })
+  expect(day.appended.length).toBe(1)
+  expect((await ui.find({ type: 'Text', text: /@ghost: no running session/ }))).toBeDefined()
+  await ui.unmount()
+})
+
+test('the feed follows the file every 2 s while the pane is open, then stops', async ($, on) => {
+  const clock = mock.clock(on)
+  const day = world(on)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+
+  // Another session posts.
+  day.lines.push('- 15:00 **coachcard-1e**: new from elsewhere')
+  day.mtimeMs = 5
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: /new from elsewhere/ })).toBeDefined()
+
+  // Unchanged mtime: one stat, no re-read.
+  const tailsBefore = day.stats
+  await clock.advance(2000)
+  expect(day.stats).toBe(tailsBefore + 1)
+
+  // The person closes the pane: the next tick stops polling.
+  day.isOpen = false
+  await clock.advance(2000)
+  const statsAfterClose = day.stats
+  await clock.advance(10_000)
+  expect(day.stats).toBe(statsAfterClose)
+  await ui.unmount()
+})
