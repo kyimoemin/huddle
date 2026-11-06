@@ -164,13 +164,16 @@ test('ListAgents rows stand in for claude agents: self from the header, peers by
       listing: 'This session is huddle-5a [2195f3] — the name other sessions use to message it.\n\nPeer sessions (2): ...',
       sections: [
         {
-          kind: 'peers',
+          kind: 'sessions',
           rows: [
             { name: 'coachcard-1e', ref: '3d3fa0', type: 'interactive', status: 'idle' },
             { name: 'nightly-qa', ref: '[06853d]', type: 'background', status: 'busy' },
+            { name: 'laptop-2', ref: 'abcdef', type: 'remote', status: 'idle' },
             { ref: 'ffffff' },
           ],
         },
+        // Not local sessions: left out.
+        { kind: 'subagents', rows: [{ name: 'explorer', id: 'a1', type: 'Explore', status: 'busy' }] },
       ],
     },
     'sid',
@@ -186,4 +189,16 @@ test('ListAgents rows stand in for claude agents: self from the header, peers by
     { name: 'coachcard-1e', sessionId: 'ref:3d3fa0', address: 'coachcard-1e [3d3fa0]' },
   ])
   expect(parseListAgents({}, 'sid')).toEqual([])
+})
+
+test('mentions differing only in case reach a session once', () => {
+  expect(parseMentions('@Docs-pass see above, @docs-pass ping')).toEqual(['Docs-pass'])
+})
+
+test("the person can mention this session from its own panel; a session can't mention itself", () => {
+  expect(resolveMentions(['huddle-5a'], ROWS, 'me', true)).toEqual({
+    targets: [{ name: 'huddle-5a', sessionId: 'me', isSelf: true }],
+    unknown: [],
+  })
+  expect(resolveMentions(['huddle-5a'], ROWS, 'me')).toEqual({ targets: [], unknown: [] })
 })

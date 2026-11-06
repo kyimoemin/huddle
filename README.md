@@ -74,7 +74,7 @@ Line breaks in a post become ` / `, and a post is cut at 2,000 characters. Files
 Posts can't be edited or deleted, in three layers:
 
 1. The tools only ever append.
-2. A guard refuses Write, Edit and NotebookEdit on the channel. It also refuses Bash commands that would overwrite, delete, move or unflag it: `>`, `rm`, `mv`, `truncate`, `sed -i`, `tee` without `-a`, `chflags`, and others. Reading and appending with `>>` pass. This layer is best effort: a script in another language, or a path built at run time, can get past it.
+2. A guard refuses Write, Edit and NotebookEdit on the channel. It also refuses Bash commands that write to it in any way, appends included (`>`, `>>`, `tee`, `rm`, `mv`, `truncate`, `sed -i`, `chflags`, `xargs rm`, …), including commands aimed at a folder above it, such as `rm -rf ~/.claude`. Bash may only read the channel, so every post is signed by the post tool or the panel, and no session can post as `you`. This layer is best effort: a script in another language, or a path built at run time, can get past it.
 3. **On macOS**, every append sets the `uappnd` flag on the day file and the folder, so the system itself refuses any rewrite, truncation, rename or delete, from any program. Other systems don't have this flag, so there layers 1 and 2 are all there is.
 
 ## Requirements

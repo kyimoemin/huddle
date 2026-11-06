@@ -14,7 +14,10 @@ function engine(
   on: On,
   answer: (argv: readonly string[]) => Answer = () => ({ exitCode: 0 }),
   huddleDirEnv?: string,
-  /** `CLAUDE_CODE_EXECPATH`; a path holding `broken` does not start, nor does `claude` with `noCli`. */
+  /**
+   * `CLAUDE_CODE_EXECPATH`: a path holding `broken` does not start, one holding
+   * `/old/` starts and fails; `claude` itself does not start with `noCli`.
+   */
   cli: { execPath?: string; noCli?: boolean } = {},
 ) {
   const runs: (readonly string[])[] = []
@@ -37,6 +40,9 @@ function engine(
     const isCli = e.argv[0] === 'claude' || (cli.execPath !== undefined && e.argv[0] === cli.execPath)
     if (isCli && (e.argv[0]!.includes('broken') || (e.argv[0] === 'claude' && cli.noCli))) {
       return { deny: `spawn ${e.argv[0]} ENOENT` }
+    }
+    if (isCli && e.argv[0]!.includes('/old/')) {
+      return { value: { exitCode: 1, stdout: '', stderr: 'unknown command', ...WHOLE } }
     }
     if (isCli) {
       const rows = [
@@ -225,16 +231,17 @@ test('a link into the channel is refused too', async ($, on) => {
   expect(ran).toEqual([])
 })
 
-test('writes elsewhere, and Bash reads or appends, run as usual', async ($, on) => {
+test('writes elsewhere and Bash reads run as usual; a Bash append is refused', async ($, on) => {
   engine(on)
   const { ran } = files(on)
   await $.session.start(START)
 
   await $.tool.call({ tool: 'Write', file_path: '/h/notes/huddle.md', content: 'x' })
   await $.tool.call({ tool: 'Bash', command: 'tail -n 5 ~/.claude/huddle/2026-11-06.md' })
-  await $.tool.call({ tool: 'Bash', command: 'echo hi >> ~/.claude/huddle/2026-11-06.md' })
+  const append = await $.tool.call({ tool: 'Bash', command: 'echo "- 14:40 **you**: hi" >> ~/.claude/huddle/2026-11-06.md' })
 
-  expect(ran).toEqual(['Write', 'Bash', 'Bash'])
+  expect(ran).toEqual(['Write', 'Bash'])
+  expect(append.deny).toContain('mcp__huddle__post')
 })
 
 test('Bash that rewrites or unflags the channel is refused with the reason', async ($, on) => {
@@ -246,7 +253,7 @@ test('Bash that rewrites or unflags the channel is refused with the reason', asy
   const clobber = await $.tool.call({ tool: 'Bash', command: 'echo x > /private/h/.claude/huddle/2026-11-06.md' })
 
   expect(unflag.deny).toContain('runs chflags on it')
-  expect(clobber.deny).toContain('with >')
+  expect(clobber.deny).toContain('with a redirect')
   expect(ran).toEqual([])
 })
 
@@ -366,7 +373,7 @@ test('with no claude CLI, ListAgents names this session and mentions go to name 
   on('tool.call', { tool: 'ListAgents' }, () => ({
     result: {
       listing: 'This session is huddle-5a [2195f3] — the name other sessions use to message it.',
-      sections: [{ kind: 'peers', total: 1, rows: [{ name: 'coachcard-1e', ref: '3d3fa0', type: 'interactive', status: 'idle' }] }],
+      sections: [{ kind: 'sessions', total: 1, rows: [{ name: 'coachcard-1e', ref: '3d3fa0', type: 'interactive', status: 'idle' }] }],
     },
   }))
   await $.session.start(START)
@@ -376,4 +383,26 @@ test('with no claude CLI, ListAgents names this session and mentions go to name 
   expect(String(done.result)).toContain('**huddle-5a**: @coachcard-1e hi')
   expect(String(done.result)).toContain('notified @coachcard-1e')
   expect(sent.map((m) => m.to)).toEqual(['coachcard-1e [3d3fa0]'])
+})
+
+test('overlapping lookups share one claude agents run', async ($, on) => {
+  const { runs } = engine(on)
+  mailbox(on)
+  await $.session.start(START)
+
+  await Promise.all([
+    $.tool.call({ tool: POST_TOOL, text: '@coachcard-1e one' }),
+    $.tool.call({ tool: POST_TOOL, text: '@coachcard-1e two' }),
+  ])
+
+  expect(runs.filter((argv) => argv[1] === 'agents').length).toBe(1)
+})
+
+test("a bundled binary that runs but fails is retried as claude on the PATH", async ($, on) => {
+  const { runs } = engine(on, undefined, undefined, { execPath: '/old/claude' })
+  await $.session.start(START)
+  const done = await $.tool.call({ tool: POST_TOOL, text: 'hi' })
+
+  expect(String(done.result)).toContain('**huddle-5a**')
+  expect(runs.filter((argv) => argv[1] === 'agents').map((argv) => argv[0])).toEqual(['/old/claude', 'claude'])
 })

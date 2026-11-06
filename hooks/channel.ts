@@ -31,26 +31,32 @@ export function runner($: $): Run {
 /**
  * Runs the `claude` CLI. First the binary running this session
  * (`$CLAUDE_CODE_EXECPATH`), which the desktop app and the VS Code extension
- * bundle off the PATH; then `claude` on the PATH, where that is unset or
- * does not start. Rejects only when neither starts.
+ * bundle off the PATH; then `claude` on the PATH, where that is unset,
+ * does not start, or fails. Rejects only when neither starts.
  */
 export async function runClaude($: $, args: readonly string[], timeoutMs: number): Promise<ProcessRunResult> {
   const own = await $.env.get('CLAUDE_CODE_EXECPATH')
+  let ownResult: ProcessRunResult | undefined
   if (own) {
     try {
-      return await $.process.run([own, ...args], { timeoutMs })
+      ownResult = await $.process.run([own, ...args], { timeoutMs })
+      if (ownResult.exitCode === 0) return ownResult
     } catch {
       // Fall back to the PATH.
     }
   }
   try {
-    return await $.process.run(['claude', ...args], { timeoutMs })
+    const onPath = await $.process.run(['claude', ...args], { timeoutMs })
+    // Where both ran and failed, the session's own binary says why.
+    return onPath.exitCode !== 0 && ownResult ? ownResult : onPath
   } catch (error) {
+    if (ownResult) return ownResult
     throw new Error(`the claude command could not be run (${errorText(error)})`)
   }
 }
 
 let cachedSessions: { rows: SessionRow[]; at: number } | undefined
+let pendingSessions: Promise<SessionRow[]> | undefined
 
 /**
  * The running local sessions: `claude agents --json`, or where that cannot
@@ -58,8 +64,16 @@ let cachedSessions: { rows: SessionRow[]; at: number } | undefined
  * at most one lookup; names change and repeat, so not for long.
  */
 export async function sessions($: $): Promise<SessionRow[]> {
+  if (cachedSessions && Date.now() - cachedSessions.at < SESSIONS_TTL_MS) return cachedSessions.rows
+  // Callers that overlap (a poll tick, a post) share one lookup.
+  pendingSessions ??= lookUpSessions($).finally(() => {
+    pendingSessions = undefined
+  })
+  return pendingSessions
+}
+
+async function lookUpSessions($: $): Promise<SessionRow[]> {
   const now = Date.now()
-  if (cachedSessions && now - cachedSessions.at < SESSIONS_TTL_MS) return cachedSessions.rows
   let rows: SessionRow[]
   try {
     const { exitCode, stdout, stderr } = await runClaude($, ['agents', '--json'], 10_000)
@@ -87,6 +101,7 @@ async function listAgents($: $): Promise<SessionRow[]> {
 /** Drops the cached session list, so the next read runs `claude agents` again. */
 export function forgetSessions(): void {
   cachedSessions = undefined
+  pendingSessions = undefined
 }
 
 /** This session's name as ListAgents shows it; the folder name when that fails. */
@@ -105,7 +120,7 @@ export async function ownName($: $): Promise<string> {
  * Sends each session a post @mentions a message saying so, and toasts what
  * did not reach anyone. Returns one line for the poster; empty with no mentions.
  */
-export async function deliverMentions($: $, author: string, text: string, line: string): Promise<string> {
+export async function deliverMentions($: $, author: string, text: string, line: string, isPerson = false): Promise<string> {
   const names = parseMentions(text)
   if (names.length === 0) return ''
   let rows: SessionRow[]
@@ -116,11 +131,17 @@ export async function deliverMentions($: $, author: string, text: string, line: 
     $.ui.toast(problem)
     return problem
   }
-  const { targets, unknown } = resolveMentions(names, rows, await $.session.id())
+  // The person posting from this session's panel can mention this session too.
+  const { targets, unknown } = resolveMentions(names, rows, await $.session.id(), isPerson)
   const message = mentionMessage(author, line)
   const sent = await Promise.all(
     targets.map(async (target) => {
       try {
+        if (target.isSelf) {
+          // This session's own turn, once it is idle, as a typed prompt would be.
+          void $.prompt.submit({ text: message })
+          return { ...target, ok: true as const }
+        }
         const to = target.address ?? { sessionId: target.sessionId }
         const { isDelivered, reason } = await $.session.send({ to, text: message })
         return isDelivered ? { ...target, ok: true as const } : { ...target, ok: false as const, reason }

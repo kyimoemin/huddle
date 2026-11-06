@@ -290,3 +290,24 @@ test('a long session list takes at most half the pane and counts the rest', asyn
   expect((await ui.find({ type: 'Text', text: /more$/ }))?.text).toBe('+22 more')
   await ui.unmount()
 })
+
+test("mentioning this session from its own panel prompts it instead of dropping the mention", async ($, on) => {
+  const day = world(on)
+  const prompts: string[] = []
+  on('prompt.submit', (_, e) => {
+    prompts.push(e.text)
+    return { text: e.text }
+  })
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+
+  await ui.input({ key: 'post', text: '@huddle-5a please rebase' })
+
+  expect(day.sent).toEqual([])
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toContain('You were mentioned in #huddle by you:')
+  expect(prompts[0]).toContain('**you**: @huddle-5a please rebase')
+  expect(await ui.find({ type: 'Text', text: /no running session/ })).toBeUndefined()
+  await ui.unmount()
+})

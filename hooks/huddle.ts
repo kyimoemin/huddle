@@ -59,7 +59,7 @@ export function formatEntry({ at, name, text }: Entry): string {
 }
 
 /**
- * The names a post @mentions, each once, in order. A mention starts the text
+ * The names a post @mentions, each once (case aside), in order. A mention starts the text
  * or follows a space or an opening bracket, so an email address is not one.
  * Trailing dots, dashes and underscores are left off (`@coachcard-1e.`).
  */
@@ -67,7 +67,7 @@ export function parseMentions(text: string): string[] {
   const found: string[] = []
   for (const match of text.matchAll(/(?:^|[\s([{])@([A-Za-z0-9][\w.-]*)/g)) {
     const name = match[1]!.replace(/[._-]+$/, '')
-    if (name !== '' && !found.includes(name)) found.push(name)
+    if (name !== '' && !found.some((seen) => seen.toLowerCase() === name.toLowerCase())) found.push(name)
   }
   return found
 }
@@ -132,16 +132,23 @@ const NOT_SESSIONS = new Set(['you'])
 
 export type Mentions = {
   /** Every session a mention reaches; a name several sessions share reaches each. */
-  targets: { name: string; sessionId: string; address?: string }[]
+  targets: { name: string; sessionId: string; address?: string; isSelf?: true }[]
   /** Mentioned names no running session carries. */
   unknown: string[]
 }
 
 /**
- * Resolves mentioned names to running sessions, case-insensitively. This
- * session (`selfId`) and `@you` are left out, neither reached nor unknown.
+ * Resolves mentioned names to running sessions, case-insensitively. `@you`
+ * is left out, neither reached nor unknown. This session (`selfId`) is left
+ * out too, unless `includeSelf` (the person posting from this session's
+ * panel), when it is a target marked `isSelf`.
  */
-export function resolveMentions(names: readonly string[], rows: readonly SessionRow[], selfId: string): Mentions {
+export function resolveMentions(
+  names: readonly string[],
+  rows: readonly SessionRow[],
+  selfId: string,
+  includeSelf = false,
+): Mentions {
   const targets: Mentions['targets'] = []
   const unknown: string[] = []
   for (const name of names) {
@@ -150,7 +157,10 @@ export function resolveMentions(names: readonly string[], rows: readonly Session
     const matches = rows.filter((row) => row.name.toLowerCase() === lower)
     if (matches.length === 0) unknown.push(name)
     for (const row of matches) {
-      if (row.sessionId === selfId) continue
+      if (row.sessionId === selfId) {
+        if (includeSelf) targets.push({ name: row.name, sessionId: row.sessionId, isSelf: true })
+        continue
+      }
       targets.push(row.address ? { name: row.name, sessionId: row.sessionId, address: row.address } : { name: row.name, sessionId: row.sessionId })
     }
   }
@@ -172,6 +182,8 @@ export function parseSessions(stdout: string): SessionRow[] {
   )
 }
 
+const LOCAL_KINDS = new Set(['interactive', 'background'])
+
 /** What the ListAgents tool answers, the parts huddle reads. */
 export type ListAgentsResult = {
   listing?: string
@@ -189,8 +201,10 @@ export function parseListAgents(result: ListAgentsResult, selfId: string): Sessi
   const self = /This session is (.+?)(?: \[([0-9a-f]+)\])?(?: [—-]|\s*\(|$)/m.exec(result.listing ?? '')
   if (self?.[1]) rows.push({ sessionId: selfId, name: self[1].trim() })
   for (const section of result.sections ?? []) {
+    // Local sessions only: not subagents, teammates, or sessions elsewhere.
+    if (section.kind !== 'sessions') continue
     for (const row of section.rows ?? []) {
-      if (!row.name) continue
+      if (!row.name || (row.type !== undefined && !LOCAL_KINDS.has(row.type))) continue
       const ref = row.ref?.replace(/^\[|\]$/g, '')
       rows.push({
         sessionId: `ref:${ref ?? row.id ?? row.name}`,

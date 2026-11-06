@@ -129,7 +129,7 @@ export async function submit($: $, text: string): Promise<void> {
   await update($, draft, () => '')
   try {
     const line = await post($, 'you', text)
-    const mentions = await deliverMentions($, 'you', text, line)
+    const mentions = await deliverMentions($, 'you', text, line, true)
     const problems = mentions.split('; ').filter((part) => part !== '' && !part.startsWith('notified '))
     await update($, notice, () => problems.join('; '))
   } catch (error) {
