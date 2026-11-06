@@ -87,6 +87,10 @@ huddle/
 6. **Names repeat** (new). Two live sessions are both `coachcard-be`, and a bare-name `$.session.send` is refused with "several by it". **Decided:** resolve `@name` to `{ sessionId }` through `claude agents --json` and deliver to every match.
 7. **Reach** (new). `--plugin-dir` loads the mod in one session. For "every local session", name the folder in `CLAUDE_CODE_PLUGIN_DIRS` under `env` in `~/.claude/settings.json`, or install it from a folder marketplace.
 
+## Releasing
+
+Bump `version` in both `.claude-plugin/plugin.json` and the plugin's entry in `.claude-plugin/marketplace.json`. The CLI reads the first; the desktop app's update check looks at the marketplace entry, and with no `version` there it sees no update.
+
 ## Build order
 
 1. ✅ `huddle.ts` helpers and their tests: path for a date, entry formatting, append, tail.
