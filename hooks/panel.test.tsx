@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { ago, bar, conversations, fitLines, parseRow, postRowsFor, sortPeers, splitMentions } from './panel'
+import { ago, barFill, conversations, fitLines, parseRow, postRowsFor, sortPeers, splitMentions } from './panel'
 
 const WHOLE = { isStdoutTruncated: false, isStderrTruncated: false }
 const START = { cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true } as const
@@ -402,12 +402,12 @@ test("each session's row shows its context fill; a session without huddle shows 
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
 
-  expect((await ui.find({ type: 'Text', text: '▰▰▱▱▱ 42%' }))?.props.color).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: '42%' }))?.props.color).toBeUndefined()
   // Nearly full is drawn in the warning color.
-  expect((await ui.find({ type: 'Text', text: '▰▰▰▰▰ 91%' }))?.props.color).toBe('warning')
+  expect((await ui.find({ type: 'Text', text: '91%' }))?.props.color).toBe('warning')
   expect(await ui.findAll({ type: 'Text', text: /%$/ })).toHaveLength(2)
   // A session with neither huddle nor a transcript says so.
-  expect(await ui.find({ type: 'Text', text: 'no context data' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'no data' })).toBeDefined()
   // A file whose session is not running is not read.
   expect(day.reads.some((path) => path.includes('gone'))).toBe(false)
 
@@ -418,7 +418,7 @@ test("each session's row shows its context fill; a session without huddle shows 
   day.context.sid = { mtimeMs: 2, text: JSON.stringify({ percent: 55, at: 2 }) }
   await clock.advance(2000)
   expect(day.reads.length).toBe(reads + 1)
-  expect(await ui.find({ type: 'Text', text: '▰▰▰▱▱ 55%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '55%' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -472,9 +472,9 @@ test("a session without huddle has its context read off its transcript, as a % w
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('desktop'))
 
-  expect(await ui.find({ type: 'Text', text: '▰▰▰▱▱ ~50%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '~50%' })).toBeDefined()
   // No huddle session on its model: tokens, not a guessed %.
-  expect(await ui.find({ type: 'Text', text: '~114k tokens' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '~114k tok' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /coach\.card/ })).toBeDefined()
 
   // A transcript is tailed again only once it changed, and at most every 10 s.
@@ -486,7 +486,7 @@ test("a session without huddle has its context read off its transcript, as a % w
   expect(day.tails).toBe(tails)
   await clock.advance(8000)
   expect(day.tails).toBe(tails + 1)
-  expect(await ui.find({ type: 'Text', text: '~600k tokens' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '~600k tok' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -594,7 +594,7 @@ test('the feed draws mentions apart and each author with its icon', async ($, on
   await ui.unmount()
 })
 
-test('splitMentions and bar', () => {
+test('splitMentions and barFill', () => {
   expect(splitMentions('hi @a, (@b-2.) mail x@y.z')).toEqual([
     { text: 'hi ' },
     { text: '@a', isMention: true },
@@ -602,7 +602,7 @@ test('splitMentions and bar', () => {
     { text: '@b-2', isMention: true },
     { text: '.) mail x@y.z' },
   ])
-  expect([bar(0), bar(9), bar(10), bar(50), bar(100)]).toEqual(['▱▱▱▱▱', '▱▱▱▱▱', '▰▱▱▱▱', '▰▰▰▱▱', '▰▰▰▰▰'])
+  expect([barFill(-5), barFill(9), barFill(100), barFill(140)]).toEqual(['0%', '9%', '100%', '100%'])
 })
 
 test('the talking arrow goes once the post is ten minutes old, with no other change', async ($, on) => {

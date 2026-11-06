@@ -103,10 +103,14 @@ export async function refreshPeers($: $): Promise<void> {
 const AGES_MS = 30_000
 let lastPeersWrite = 0
 
-/** Five cells filled to `percent`: `▰▰▱▱▱`. */
-export function bar(percent: number): string {
-  const filled = Math.min(5, Math.max(0, Math.round(percent / 20)))
-  return '▰'.repeat(filled) + '▱'.repeat(5 - filled)
+/** Columns of a session row's right side, so every row's bar, figure and age line up. */
+const BAR_COLUMNS = 10
+const PERCENT_COLUMNS = 5
+const AGE_COLUMNS = 3
+
+/** How much of the bar is filled: `percent` held to 0 to 100. */
+export function barFill(percent: number): string {
+  return `${Math.min(100, Math.max(0, percent))}%`
 }
 
 /** Whether `name` is one of the names a post mentioned. */
@@ -369,6 +373,7 @@ export function registerPanel(on: On): void {
           const isBusy = peer.status === 'busy'
           const { percent, tokens, estimated } = peer.context ?? {}
           const talk = talks.get(peer.sessionId)
+          const isFull = percent !== undefined && percent >= CONTEXT_WARN
           return (
             <Box key={`peer-${peer.sessionId}`} flexDirection="row" gap={1}>
               <Text color={isBusy ? 'warning' : undefined} dimColor={!isBusy}>
@@ -384,6 +389,7 @@ export function registerPanel(on: On): void {
                     .catch(() => {})
                 }
               />
+              <Box flexDirection="row" gap={1} flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
               <Button
                 key={`mention-${peer.sessionId}`}
                 plain
@@ -399,17 +405,6 @@ export function registerPanel(on: On): void {
                   .filter(Boolean)
                   .join(' · ')}
               </Text>
-              {percent !== undefined ? (
-                <Text dimColor={percent < CONTEXT_WARN} color={percent >= CONTEXT_WARN ? 'warning' : undefined}>
-                  {bar(percent)} {estimated ? '~' : ''}
-                  {percent}%
-                </Text>
-              ) : tokens !== undefined ? (
-                <Text dimColor>~{compactTokens(tokens)} tokens</Text>
-              ) : (
-                <Text dimColor>no context data</Text>
-              )}
-              {peer.startedAt ? <Text dimColor>{ago(now - peer.startedAt)}</Text> : null}
               {talk && (
                 <Text color="suggestion">
                   {[
@@ -423,6 +418,33 @@ export function registerPanel(on: On): void {
               {peer.kind === 'background' && peer.id && !isSelf && (
                 <Button key={`stop-${peer.id}`} label="stop" onPress={() => void stopPeer($, peer)} />
               )}
+              </Box>
+              <Box width={BAR_COLUMNS} flexShrink={0}>
+                {percent !== undefined ? (
+                  <Box key={`bar-${peer.sessionId}`} width={BAR_COLUMNS} height={1} backgroundColor="subtle" overflow="hidden">
+                    <Box width={barFill(percent)} height="100%" backgroundColor={isFull ? 'warning' : 'suggestion'} />
+                  </Box>
+                ) : (
+                  <Text dimColor wrap="truncate">
+                    {tokens !== undefined ? `~${compactTokens(tokens)} tok` : 'no data'}
+                  </Text>
+                )}
+              </Box>
+              <Box width={PERCENT_COLUMNS} flexShrink={0} justifyContent="flex-end">
+                {percent !== undefined && (
+                  <Text tabular dimColor={!isFull} color={isFull ? 'warning' : undefined}>
+                    {estimated ? '~' : ''}
+                    {percent}%
+                  </Text>
+                )}
+              </Box>
+              <Box width={AGE_COLUMNS} flexShrink={0} justifyContent="flex-end">
+                {peer.startedAt ? (
+                  <Text tabular dimColor>
+                    {ago(now - peer.startedAt)}
+                  </Text>
+                ) : null}
+              </Box>
             </Box>
           )
         })}
