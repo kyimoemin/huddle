@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { ago, fitLines, parseRow, sortPeers } from './panel'
+import { ago, bar, conversations, fitLines, parseRow, sortPeers, splitMentions } from './panel'
 
 const WHOLE = { isStdoutTruncated: false, isStderrTruncated: false }
 const START = { cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true } as const
@@ -49,6 +49,9 @@ function world(on: On) {
     removed: [] as string[],
     listFails: false,
     reads: [] as string[],
+    /** Transcripts by path: what sessions without huddle have written. */
+    transcripts: {} as Record<string, { mtimeMs: number; text: string }>,
+    tails: 0,
     peers: [
       { sessionId: 'sid', name: 'huddle-5a', kind: 'interactive', status: 'busy', startedAt: 1000 },
       { sessionId: 's1', name: 'coachcard-1e', kind: 'interactive', status: 'idle', startedAt: 2000 },
@@ -73,6 +76,8 @@ function world(on: On) {
     return { value: undefined }
   })
   on('fs.stat', (_, e) => {
+    const transcript = state.transcripts[e.path]
+    if (transcript) return { value: { kind: 'file', size: 1, mtimeMs: transcript.mtimeMs, isLink: false } }
     if (!e.path.endsWith('.md')) return { deny: `ENOENT: ${e.path}` }
     state.stats++
     return state.mtimeMs === 0
@@ -106,6 +111,11 @@ function world(on: On) {
     if (cmd === '/bin/rm') {
       state.removed.push(...e.argv.slice(2))
       return out('')
+    }
+    if (cmd === '/usr/bin/tail' && e.argv[1] === '-c') {
+      state.tails++
+      const transcript = state.transcripts[e.argv[3]!]
+      return transcript ? out(transcript.text) : out('', 1)
     }
     if (cmd === '/usr/bin/tail') return state.mtimeMs === 0 ? out('', 1) : out(state.lines.map((l) => `${l}\n`).join(''))
     if (cmd === '/bin/sh') {
@@ -167,7 +177,7 @@ test('an empty day says so', async ($, on) => {
   await $.command.run(HUDDLE)
 
   const ui = await $.ui.mount(PANE('terminal'))
-  expect((await ui.find({ type: 'Text', text: /No posts today/ }))?.text).toContain('@name mentions a session')
+  expect((await ui.find({ type: 'Text', text: /No posts today/ }))?.text).toContain('click a session to mention it')
   await ui.unmount()
 })
 
@@ -250,18 +260,17 @@ test('the session list opens from its header and offers Stop on background sessi
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount(PANE(surface))
-    const header = await ui.find({ key: 'peers' })
-    expect(header?.props.label).toBe('▸ Sessions: 3, 2 busy')
-    expect(await ui.find({ type: 'Text', text: /nightly-qa/ })).toBeUndefined()
-
-    await ui.press({ key: 'peers' })
-    expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions: 3, 2 busy')
-    expect(await ui.find({ type: 'Text', text: /nightly-qa/ })).toBeDefined()
+    // Open by default.
+    expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 3 · 2 busy')
+    expect((await ui.find({ key: 'mention-bg-full' }))?.props.label).toMatch(/^\S+ nightly-qa$/)
     expect(await ui.find({ type: 'Text', text: /this session/ })).toBeDefined()
     expect(await ui.find({ key: 'stop-bg1' })).toBeDefined()
     // No Stop for interactive sessions, this one included.
     for (const id of ['sid', 's1', 'undefined']) expect(await ui.find({ key: `stop-${id}` })).toBeUndefined()
 
+    await ui.press({ key: 'peers' })
+    expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▸ Sessions 3 · 2 busy')
+    expect(await ui.find({ key: 'mention-bg-full' })).toBeUndefined()
     await ui.press({ key: 'peers' })
     await ui.unmount()
   }
@@ -273,14 +282,13 @@ test('Stop runs claude stop with the short id, toasts, and drops the row', async
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
-  await ui.press({ key: 'peers' })
 
   await ui.press({ key: 'stop-bg1' })
 
   expect(day.stops).toEqual(['bg1'])
   expect(day.toasts.at(-1)).toBe('Stopped nightly-qa. Resume it with: claude attach bg1')
   expect(await ui.find({ key: 'stop-bg1' })).toBeUndefined()
-  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions: 2, 1 busy')
+  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 2 · 1 busy')
   await ui.unmount()
 })
 
@@ -290,7 +298,6 @@ test('a Stop that fails says why under the feed and keeps the row', async ($, on
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
-  await ui.press({ key: 'peers' })
 
   await ui.press({ key: 'stop-bg1' })
 
@@ -305,11 +312,10 @@ test('a long session list takes at most half the pane and counts the rest', asyn
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
-  await ui.press({ key: 'peers' })
 
   // bodyRows 20: half is 10, less the header is 9 rows: 8 sessions and "+22 more".
-  expect(await ui.find({ type: 'Text', text: /^peer-7$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^peer-8$/ })).toBeUndefined()
+  expect(await ui.find({ key: 'mention-s7' })).toBeDefined()
+  expect(await ui.find({ key: 'mention-s8' })).toBeUndefined()
   expect((await ui.find({ type: 'Text', text: /more$/ }))?.text).toBe('+22 more')
   await ui.unmount()
 })
@@ -346,12 +352,13 @@ test("each session's row shows its context fill; a session without huddle shows 
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
-  await ui.press({ key: 'peers' })
 
-  expect((await ui.find({ type: 'Text', text: '42% context' }))?.props.color).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: '▰▰▱▱▱ 42%' }))?.props.color).toBeUndefined()
   // Nearly full is drawn in the warning color.
-  expect((await ui.find({ type: 'Text', text: '91% context' }))?.props.color).toBe('warning')
-  expect(await ui.findAll({ type: 'Text', text: /% context/ })).toHaveLength(2)
+  expect((await ui.find({ type: 'Text', text: '▰▰▰▰▰ 91%' }))?.props.color).toBe('warning')
+  expect(await ui.findAll({ type: 'Text', text: /%$/ })).toHaveLength(2)
+  // A session with neither huddle nor a transcript says so.
+  expect(await ui.find({ type: 'Text', text: 'no context data' })).toBeDefined()
   // A file whose session is not running is not read.
   expect(day.reads.some((path) => path.includes('gone'))).toBe(false)
 
@@ -362,7 +369,7 @@ test("each session's row shows its context fill; a session without huddle shows 
   day.context.sid = { mtimeMs: 2, text: JSON.stringify({ percent: 55, at: 2 }) }
   await clock.advance(2000)
   expect(day.reads.length).toBe(reads + 1)
-  expect(await ui.find({ type: 'Text', text: '55% context' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '▰▰▰▱▱ 55%' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -386,6 +393,109 @@ test('the session list still shows when the context files cannot be read', async
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
-  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▸ Sessions: 3, 2 busy')
+  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 3 · 2 busy')
   await ui.unmount()
+})
+
+const reply = (tokens: number, model = 'opus') =>
+  JSON.stringify({ type: 'assistant', message: { model, usage: { input_tokens: tokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })
+
+test("a session without huddle has its context read off its transcript, as a % where a huddle session on its model gives the window", async ($, on) => {
+  const clock = mock.clock(on)
+  const day = world(on)
+  day.peers = [
+    { sessionId: 'sid', name: 'huddle-5a', kind: 'interactive', status: 'busy', startedAt: 1000, cwd: '/Users/me/Projects/huddle' },
+    { sessionId: 's1', name: 'coachcard-1e', kind: 'interactive', status: 'idle', startedAt: 2000, cwd: '/Users/me/coach.card' },
+    { sessionId: 's2', name: 'other', kind: 'interactive', status: 'idle', startedAt: 3000, cwd: '/Users/me/other' },
+  ]
+  day.context = { sid: { mtimeMs: 1, text: JSON.stringify({ percent: 11, window: 1_000_000, model: 'opus', at: 1 }) } }
+  day.transcripts = {
+    '/h/.claude/projects/-Users-me-coach-card/s1.jsonl': { mtimeMs: 1, text: `{"cut\n${reply(250_000)}\n` },
+    '/h/.claude/projects/-Users-me-other/s2.jsonl': { mtimeMs: 1, text: `${reply(114_247, 'sonnet')}\n` },
+  }
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('desktop'))
+
+  expect(await ui.find({ type: 'Text', text: '▰▱▱▱▱ ~25%' })).toBeDefined()
+  // No huddle session on its model: tokens, not a guessed %.
+  expect(await ui.find({ type: 'Text', text: '~114k tokens' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /coach\.card/ })).toBeDefined()
+
+  // A transcript is tailed again only once it changed.
+  const tails = day.tails
+  await clock.advance(2000)
+  expect(day.tails).toBe(tails)
+  day.transcripts['/h/.claude/projects/-Users-me-coach-card/s1.jsonl'] = { mtimeMs: 2, text: `${reply(600_000)}\n` }
+  await clock.advance(2000)
+  expect(day.tails).toBe(tails + 1)
+  expect(await ui.find({ type: 'Text', text: '▰▰▰▱▱ ~60%' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a session that posted shows whom it is talking to, and they show who talks to them', async ($, on) => {
+  const day = world(on)
+  day.context = { sid: { mtimeMs: 1, text: JSON.stringify({ percent: 5, post: { at: Date.now() - 60_000, to: ['coachcard-1e'] }, at: 1 }) } }
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+
+  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 3 · 2 busy · 2 talking')
+  expect((await ui.find({ type: 'Text', text: '→ @coachcard-1e' }))?.props.color).toBe('suggestion')
+  expect(await ui.find({ type: 'Text', text: '← huddle-5a' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a post older than ten minutes is no longer talking', () => {
+  const now = 1_000_000_000
+  const peers = [
+    { sessionId: 'a', name: 'sprint 25', post: { at: now - 11 * 60_000, to: ['b'] } },
+    { sessionId: 'b', name: 'b', post: { at: now - 1000, to: ['Sprint-25'] } },
+  ]
+  expect([...conversations(peers, now)]).toEqual([
+    ['a', { to: [], from: ['b'] }],
+    ['b', { to: ['Sprint-25'], from: [] }],
+  ])
+})
+
+test('clicking a session puts its @handle in the post box, once', async ($, on) => {
+  const day = world(on)
+  day.peers.push({ sessionId: 's9', name: 'sprint 25', kind: 'interactive', status: 'idle' })
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(PANE(surface))
+    await ui.input({ key: 'post', text: 'hey', kind: 'change' })
+    await ui.press({ key: 'mention-s1' })
+    await ui.press({ key: 'mention-s9' })
+    await ui.press({ key: 'mention-s1' })
+    expect((await ui.find({ key: 'post' }))?.props.value).toBe('hey @coachcard-1e @sprint-25 ')
+    await ui.input({ key: 'post', text: '', kind: 'change' })
+    await ui.unmount()
+  }
+  expect(day.appended).toEqual([])
+})
+
+test('the feed draws mentions apart and each author with its icon', async ($, on) => {
+  const day = world(on)
+  day.lines = ['- 14:35 **you**: @coachcard-1e which tests?']
+  day.mtimeMs = 1
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  expect((await ui.find({ type: 'Text', text: /^@coachcard-1e$/ }))?.props.color).toBe('suggestion')
+  expect(await ui.find({ type: 'Text', text: /^👤 you$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('splitMentions and bar', () => {
+  expect(splitMentions('hi @a, (@b-2.) mail x@y.z')).toEqual([
+    { text: 'hi ' },
+    { text: '@a', isMention: true },
+    { text: ', (' },
+    { text: '@b-2', isMention: true },
+    { text: '.) mail x@y.z' },
+  ])
+  expect([bar(0), bar(9), bar(10), bar(50), bar(100)]).toEqual(['▱▱▱▱▱', '▱▱▱▱▱', '▰▱▱▱▱', '▰▰▰▱▱', '▰▰▰▰▰'])
 })

@@ -1,7 +1,7 @@
 import type { Register } from 'claude-code'
-import { huddleDir } from './huddle'
+import { huddleDir, parseMentions } from './huddle'
 import { absolute, bashRewriteReason, collapse, isInside, type Where } from './guard'
-import { type $, channelDir, deliverMentions, errorText, ownName, post, publishContext, read, unpublishContext } from './channel'
+import { type $, channelDir, deliverMentions, errorText, ownName, post, publishContext, publishStatus, read, unpublishContext } from './channel'
 import { registerPanel, startPanel } from './panel'
 
 // Literal so `claude plugin validate` can read the matchers that use them.
@@ -98,8 +98,7 @@ export const register: Register = (on) => {
     await startPanel($)
     // A resumed session knows its fill before its first turn.
     try {
-      const { percent } = (await $.session.usage()).context
-      if (percent !== undefined) await publishContext($, percent)
+      await publishContext($, (await $.session.usage()).context)
     } catch {
       // Reported after the next turn instead.
     }
@@ -109,9 +108,7 @@ export const register: Register = (on) => {
   // Every session reports its context fill, so each panel can show everyone's.
   on('session.measure', async ($, e, next) => {
     const measured = await next(e)
-    if (e.changed.includes('context') && e.context.percent !== undefined) {
-      await publishContext($, e.context.percent).catch(() => {})
-    }
+    if (e.changed.includes('context')) await publishContext($, e.context).catch(() => {})
     return measured
   })
 
@@ -127,6 +124,8 @@ export const register: Register = (on) => {
       const author = await ownName($)
       const line = await post($, author, text)
       const mentions = await deliverMentions($, author, text, line)
+      // Every panel shows who this session last talked to.
+      await publishStatus($, { post: { at: Date.now(), to: parseMentions(text) } }).catch(() => {})
       return { result: `Posted to #huddle: ${line}${mentions ? `\nMentions: ${mentions}` : ''}` }
     } catch (error) {
       return { deny: `huddle: the post was not saved: ${errorText(error)}` }

@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { On, Timer } from 'claude-code'
 import type { Feed, Peer } from '../types'
-import { dayFile, localDay, tailFile } from './huddle'
-import { type $, channelDir, contextFills, deliverMentions, errorText, forgetSessions, post, runClaude, runner, sessions } from './channel'
+import { PERSON_ICON, addMention, compactTokens, dayFile, handle, localDay, sessionIcon, tailFile } from './huddle'
+import { type $, channelDir, deliverMentions, errorText, forgetSessions, peerStatuses, post, runClaude, runner, sessions } from './channel'
 
 export const PANE = 'huddle'
 const TITLE = '#huddle'
@@ -20,8 +20,8 @@ const feed = atom({ plugin: 'huddle', key: 'feed' } as const, { day: '', lines: 
 })
 const draft = atom({ plugin: 'huddle', key: 'draft' } as const, '')
 const notice = atom({ plugin: 'huddle', key: 'notice' } as const, '')
-const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-2' })
-const showPeers = atom({ plugin: 'huddle', key: 'showPeers' } as const, false)
+const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-3' })
+const showPeers = atom({ plugin: 'huddle', key: 'showPeers' } as const, true)
 
 /** Background sessions first (the ones Stop applies to), then newest first. */
 export function sortPeers(rows: readonly Peer[]): Peer[] {
@@ -40,33 +40,87 @@ export function ago(ms: number): string {
 
 /** Context fill at which a row's figure turns to the warning color. */
 const CONTEXT_WARN = 80
+/** How long after a post its session shows as talking. */
+export const TALK_MS = 10 * 60_000
 
 /**
- * Re-reads the session list (cached 10s) and each session's context fill,
- * writing them only when a row changed.
+ * Re-reads the session list (cached 10s) and each session's status (context
+ * fill, last post), writing them only when a row changed.
  */
 export async function refreshPeers($: $): Promise<void> {
   let rows: Peer[]
   try {
     const listed = await sessions($)
     // The list stands without the figures.
-    const context = await contextFills($, listed.map((row) => row.sessionId)).catch(() => new Map<string, number>())
+    const status = await peerStatuses($, listed).catch(() => new Map<string, never>())
     rows = sortPeers(
-      listed.map(({ sessionId, name, kind, status, id, startedAt }) => ({
-        sessionId,
-        name,
-        kind,
-        status,
-        id,
-        startedAt,
-        context: context.get(sessionId),
-      })),
+      listed.map(({ sessionId, name, kind, status: state, id, startedAt, cwd }) => {
+        const { context, post } = status.get(sessionId) ?? {}
+        const project = cwd?.split('/').filter(Boolean).at(-1)
+        return {
+          sessionId,
+          name,
+          kind,
+          status: state,
+          id,
+          startedAt,
+          ...(project ? { project } : {}),
+          ...(context ? { context } : {}),
+          ...(post ? { post } : {}),
+        }
+      }),
     )
   } catch {
     return
   }
   const current = await read($, peers)
   if (JSON.stringify(current) !== JSON.stringify(rows)) await update($, peers, () => rows)
+}
+
+/** Five cells filled to `percent`: `▰▰▱▱▱`. */
+export function bar(percent: number): string {
+  const filled = Math.min(5, Math.max(0, Math.round(percent / 20)))
+  return '▰'.repeat(filled) + '▱'.repeat(5 - filled)
+}
+
+/** Whether `name` is one of the names a post mentioned. */
+const mentions = (to: readonly string[], name: string) =>
+  to.some((tag) => tag.toLowerCase() === name.toLowerCase() || tag.toLowerCase() === handle(name).toLowerCase())
+
+/**
+ * Who each session is talking with: the names its last post (within
+ * TALK_MS) mentioned, and the sessions whose last post mentioned it.
+ */
+export function conversations(everyone: readonly Peer[], now: number): Map<string, { to: string[]; from: string[] }> {
+  const recent = everyone.filter((peer) => peer.post && now - peer.post.at < TALK_MS)
+  const out = new Map<string, { to: string[]; from: string[] }>()
+  for (const peer of everyone) {
+    const to = recent.includes(peer) ? peer.post!.to : []
+    const from = recent.filter((other) => other !== peer && mentions(other.post!.to, peer.name)).map((other) => other.name)
+    if (to.length > 0 || from.length > 0) out.set(peer.sessionId, { to, from })
+  }
+  return out
+}
+
+/** A post body cut into plain text and @mentions, to draw the mentions apart. */
+export function splitMentions(body: string): { text: string; isMention?: true }[] {
+  const parts: { text: string; isMention?: true }[] = []
+  let at = 0
+  for (const match of body.matchAll(/(^|[\s([{])(@[A-Za-z0-9][\w.-]*[A-Za-z0-9]|@[A-Za-z0-9])/g)) {
+    const start = match.index! + match[1]!.length
+    if (start > at) parts.push({ text: body.slice(at, start) })
+    parts.push({ text: match[2]!, isMention: true })
+    at = start + match[2]!.length
+  }
+  if (at < body.length) parts.push({ text: body.slice(at) })
+  return parts
+}
+
+/** The icon beside an author in the feed: the person's, or the one session of that name's. */
+export function authorIcon(name: string, everyone: readonly Peer[]): string | undefined {
+  if (name === 'you') return PERSON_ICON
+  const named = everyone.filter((peer) => peer.name === name)
+  return named.length === 1 ? sessionIcon(named[0]!.sessionId) : undefined
 }
 
 /**
@@ -217,42 +271,86 @@ export function registerPanel(on: On): void {
     const listRows = HEADER_ROWS + listed.length + (hidden > 0 ? 1 : 0)
     const shown = fitLines(lines, Math.max(1, bodyRows - BELOW_FEED - listRows), e.props.bodyColumns)
     const busy = everyone.filter((peer) => peer.status === 'busy').length
+    const talks = conversations(everyone, now)
+    const header = [`Sessions ${everyone.length}`, busy > 0 ? `${busy} busy` : '', talks.size > 0 ? `${talks.size} talking` : '']
+      .filter(Boolean)
+      .join(' · ')
 
     return (
       <Box flexDirection="column">
         <Button
           key="peers"
           plain
-          label={`${isListOpen ? '▾' : '▸'} Sessions: ${everyone.length}${busy > 0 ? `, ${busy} busy` : ''}`}
+          label={`${isListOpen ? '▾' : '▸'} ${header}`}
           onPress={() => void update($, showPeers, (open) => !open)}
         />
-        {listed.map((peer) => (
-          <Box flexDirection="row" gap={1}>
-            <Text bold={peer.sessionId === selfId}>{peer.name}</Text>
-            <Text dimColor>
-              {peer.sessionId === selfId ? 'this session' : peer.kind ?? 'session'} · {peer.status ?? '?'}
-              {peer.startedAt ? ` · ${ago(now - peer.startedAt)}` : ''}
-            </Text>
-            {peer.context !== undefined && (
-              <Text dimColor={peer.context < CONTEXT_WARN} color={peer.context >= CONTEXT_WARN ? 'warning' : undefined}>
-                {peer.context}% context
+        {listed.map((peer) => {
+          const isSelf = peer.sessionId === selfId
+          const isBusy = peer.status === 'busy'
+          const { percent, tokens, estimated } = peer.context ?? {}
+          const talk = talks.get(peer.sessionId)
+          return (
+            <Box key={`peer-${peer.sessionId}`} flexDirection="row" gap={1}>
+              <Text color={isBusy ? 'warning' : undefined} dimColor={!isBusy}>
+                {isBusy ? '●' : '○'}
               </Text>
-            )}
-            {peer.kind === 'background' && peer.id && peer.sessionId !== selfId && (
-              <Button key={`stop-${peer.id}`} label="stop" onPress={() => void stopPeer($, peer)} />
-            )}
-          </Box>
-        ))}
+              <Button
+                key={`mention-${peer.sessionId}`}
+                plain
+                label={`${sessionIcon(peer.sessionId)} ${peer.name}`}
+                onPress={() => void update($, draft, (typed) => addMention(typed, peer.name))}
+              />
+              <Text dimColor wrap="truncate">
+                {[isSelf ? 'this session' : '', peer.project ?? '', peer.kind === 'background' ? 'bg' : '']
+                  .filter(Boolean)
+                  .join(' · ')}
+              </Text>
+              {percent !== undefined ? (
+                <Text dimColor={percent < CONTEXT_WARN} color={percent >= CONTEXT_WARN ? 'warning' : undefined}>
+                  {bar(percent)} {estimated ? '~' : ''}
+                  {percent}%
+                </Text>
+              ) : tokens !== undefined ? (
+                <Text dimColor>~{compactTokens(tokens)} tokens</Text>
+              ) : (
+                <Text dimColor>no context data</Text>
+              )}
+              {peer.startedAt ? <Text dimColor>{ago(now - peer.startedAt)}</Text> : null}
+              {talk && (
+                <Text color="suggestion">
+                  {[
+                    talk.to.length > 0 ? `→ ${talk.to.map((name) => `@${name}`).join(' ')}` : '',
+                    talk.from.length > 0 ? `← ${talk.from.join(', ')}` : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                </Text>
+              )}
+              {peer.kind === 'background' && peer.id && !isSelf && (
+                <Button key={`stop-${peer.id}`} label="stop" onPress={() => void stopPeer($, peer)} />
+              )}
+            </Box>
+          )
+        })}
         {hidden > 0 && <Text dimColor>+{hidden} more</Text>}
         <Box flexDirection="column" flexGrow={1}>
-          {shown.length === 0 && <Text dimColor>No posts today. Write one below; @name mentions a session.</Text>}
+          {shown.length === 0 && <Text dimColor>No posts today. Write one below; click a session to mention it.</Text>}
           {shown.map((line) => {
             const row = parseRow(line)
             return 'raw' in row ? (
               <Text wrap="wrap">{row.raw}</Text>
             ) : (
               <Text wrap="wrap">
-                <Text dimColor>{row.time}</Text> <Text bold>{row.name}</Text> {row.body}
+                <Text dimColor>{row.time}</Text> <Text bold>{[authorIcon(row.name, everyone), row.name].filter(Boolean).join(' ')}</Text>{' '}
+                {splitMentions(row.body).map((part) =>
+                  part.isMention ? (
+                    <Text color="suggestion" bold>
+                      {part.text}
+                    </Text>
+                  ) : (
+                    part.text
+                  ),
+                )}
               </Text>
             )
           })}
@@ -260,7 +358,7 @@ export function registerPanel(on: On): void {
         {problem !== '' && <Text dimColor>{problem}</Text>}
         <Input
           key="post"
-          placeholder="Post to #huddle; @name mentions a session"
+          placeholder="Post to #huddle; click a session or type @name to mention it"
           value={typed}
           submitLabel="post"
           onInput={(value) => void update($, draft, () => value)}
