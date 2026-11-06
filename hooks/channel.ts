@@ -370,7 +370,10 @@ export async function peerStatuses($: $, rows: readonly SessionRow[]): Promise<M
   }
 
   const windows = new Map<string, number>()
-  for (const status of published.values()) if (status.model && status.window) windows.set(status.model, status.window)
+  // One model id can run with different windows: the smallest known one never shows a session emptier than it is.
+  for (const { model, window } of published.values()) {
+    if (model && window) windows.set(model, Math.min(window, windows.get(model) ?? Infinity))
+  }
 
   const configDir = await transcriptsRoot($)
   for (const row of rows) {

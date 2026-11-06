@@ -408,7 +408,12 @@ test("a session without huddle has its context read off its transcript, as a % w
     { sessionId: 's1', name: 'coachcard-1e', kind: 'interactive', status: 'idle', startedAt: 2000, cwd: '/Users/me/coach.card' },
     { sessionId: 's2', name: 'other', kind: 'interactive', status: 'idle', startedAt: 3000, cwd: '/Users/me/other' },
   ]
-  day.context = { sid: { mtimeMs: 1, text: JSON.stringify({ percent: 11, window: 1_000_000, model: 'opus', at: 1 }) } }
+  day.peers.push({ sessionId: 's3', name: 'small', kind: 'interactive', status: 'idle', startedAt: 4000 })
+  day.context = {
+    sid: { mtimeMs: 1, text: JSON.stringify({ percent: 11, window: 1_000_000, model: 'opus', at: 1 }) },
+    // The same model at a smaller window: estimates use it, and a transcript past it shows tokens.
+    s3: { mtimeMs: 1, text: JSON.stringify({ percent: 50, window: 500_000, model: 'opus', at: 1 }) },
+  }
   day.transcripts = {
     '/h/.claude/projects/-Users-me-coach-card/s1.jsonl': { mtimeMs: 1, text: `{"cut\n${reply(250_000)}\n` },
     '/h/.claude/projects/-Users-me-other/s2.jsonl': { mtimeMs: 1, text: `${reply(114_247, 'sonnet')}\n` },
@@ -417,7 +422,7 @@ test("a session without huddle has its context read off its transcript, as a % w
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('desktop'))
 
-  expect(await ui.find({ type: 'Text', text: '▰▱▱▱▱ ~25%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '▰▰▰▱▱ ~50%' })).toBeDefined()
   // No huddle session on its model: tokens, not a guessed %.
   expect(await ui.find({ type: 'Text', text: '~114k tokens' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /coach\.card/ })).toBeDefined()
@@ -429,7 +434,7 @@ test("a session without huddle has its context read off its transcript, as a % w
   day.transcripts['/h/.claude/projects/-Users-me-coach-card/s1.jsonl'] = { mtimeMs: 2, text: `${reply(600_000)}\n` }
   await clock.advance(2000)
   expect(day.tails).toBe(tails + 1)
-  expect(await ui.find({ type: 'Text', text: '▰▰▰▱▱ ~60%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '~600k tokens' })).toBeDefined()
   await ui.unmount()
 })
 
