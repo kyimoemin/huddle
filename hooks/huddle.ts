@@ -122,6 +122,8 @@ export type SessionRow = {
   startedAt?: number
   /** Its working directory; from the CLI only. */
   cwd?: string
+  /** Its process id; from the CLI only. */
+  pid?: number
   /**
    * How `$.session.send` addresses it when `sessionId` is not a real one: the
    * `name [ref]` spelling ListAgents shows, for rows read from that tool.

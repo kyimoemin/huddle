@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { On, Timer } from 'claude-code'
 import type { Feed, Peer } from '../types'
 import { PERSON_ICON, addMention, isMentionable, compactTokens, dayFile, handle, localDay, sessionIcon, tailFile } from './huddle'
+import { focusPeer } from './focus'
 import { type $, channelDir, deliverMentions, errorText, forgetSessions, peerStatuses, post, runClaude, runner, sessions } from './channel'
 
 export const PANE = 'huddle'
@@ -33,7 +34,7 @@ const draft = atom({ plugin: 'huddle', key: 'draft' } as const, '')
 const typing = atom({ plugin: 'huddle', key: 'typing' } as const, '')
 const postRows = atom({ plugin: 'huddle', key: 'postRows' } as const, 1)
 const notice = atom({ plugin: 'huddle', key: 'notice' } as const, '')
-const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-3' })
+const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-4' })
 const showPeers = atom({ plugin: 'huddle', key: 'showPeers' } as const, true)
 
 /** Background sessions first (the ones Stop applies to), then newest first. */
@@ -68,7 +69,7 @@ export async function refreshPeers($: $): Promise<void> {
     // The list stands without the figures.
     const status = await peerStatuses($, listed).catch(() => new Map<string, never>())
     rows = sortPeers(
-      listed.map(({ sessionId, name, kind, status: state, id, startedAt, cwd }) => {
+      listed.map(({ sessionId, name, kind, status: state, id, startedAt, cwd, pid }) => {
         const { context, post: last } = status.get(sessionId) ?? {}
         // Dropped once old, so the row's arrow goes with the next poll.
         const post = last && now - last.at < TALK_MS ? last : undefined
@@ -81,6 +82,8 @@ export async function refreshPeers($: $): Promise<void> {
           id,
           startedAt,
           ...(project ? { project } : {}),
+          ...(cwd ? { cwd } : {}),
+          ...(typeof pid === 'number' ? { pid } : {}),
           ...(context ? { context } : {}),
           ...(post ? { post } : {}),
         }
@@ -358,9 +361,17 @@ export function registerPanel(on: On): void {
                 {isBusy ? '●' : '○'}
               </Text>
               <Button
+                key={`focus-${peer.sessionId}`}
+                plain
+                label={sessionIcon(peer.sessionId)}
+                onPress={() =>
+                  void focusPeer($, peer).then((problem) => update($, notice, () => problem ?? ''))
+                }
+              />
+              <Button
                 key={`mention-${peer.sessionId}`}
                 plain
-                label={`${sessionIcon(peer.sessionId)} ${peer.name}`}
+                label={peer.name}
                 onPress={() =>
                   void (isMentionable(peer.name)
                     ? read($, typing).then((typed) => setPostBox($, addMention(typed, peer.name)))

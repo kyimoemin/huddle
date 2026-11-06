@@ -19,6 +19,9 @@ export type Peer = {
   startedAt?: number
   /** The name of its working folder. */
   project?: string
+  /** Its working folder and process id, to bring its window forward. */
+  cwd?: string
+  pid?: number
   /**
    * How full its context window is. `estimated` when read off its transcript
    * (no huddle loaded there); no `percent` when its window is unknown.

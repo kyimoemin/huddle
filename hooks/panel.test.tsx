@@ -44,6 +44,11 @@ function world(on: On, hasMockClock = false) {
     toasts: [] as string[],
     stops: [] as string[],
     stopFails: false,
+    /** What `ps` prints, and the app bundles that are editors (have a `code` command). */
+    ps: '',
+    editors: [] as string[],
+    /** Each `open` the plugin ran. */
+    opened: [] as string[][],
     /** The commands the plugin registered, in order. */
     commands: [] as string[],
     context: {} as Record<string, { mtimeMs: number; text: string }>,
@@ -83,6 +88,9 @@ function world(on: On, hasMockClock = false) {
     return { value: undefined }
   })
   on('fs.stat', (_, e) => {
+    if (state.editors.some((app) => e.path === `${app}/Contents/Resources/app/bin/code`)) {
+      return { value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false } }
+    }
     const transcript = state.transcripts[e.path]
     if (transcript) return { value: { kind: 'file', size: 1, mtimeMs: transcript.mtimeMs, isLink: false } }
     if (!e.path.endsWith('.md')) return { deny: `ENOENT: ${e.path}` }
@@ -114,6 +122,11 @@ function world(on: On, hasMockClock = false) {
       if (state.stopFails) return { value: { exitCode: 1, stdout: '', stderr: `No job matching '${e.argv[2]}'.`, ...WHOLE } }
       state.peers = state.peers.filter((peer) => peer.id !== e.argv[2])
       return out(`stopped ${e.argv[2]}`)
+    }
+    if (cmd === '/bin/ps') return out(state.ps)
+    if (cmd === '/usr/bin/open') {
+      state.opened.push([...e.argv])
+      return out('')
     }
     if (cmd === '/bin/rm') {
       state.removed.push(...e.argv.slice(2))
@@ -186,6 +199,22 @@ test('/huddle-panel opens the pane too, and both commands are registered', async
   const ran = await $.command.run({ ...HUDDLE, command: 'huddle-panel' })
   expect(String(ran.text)).toContain('#huddle opened')
   expect(day.isOpen).toBe(true)
+})
+
+test("a session's icon brings its window forward; a background one says it has none", async ($, on) => {
+  const day = world(on)
+  day.peers[1] = { ...day.peers[1]!, pid: 520, cwd: '/p/coachcard' } as (typeof day.peers)[number]
+  day.ps = '  520   510 ??  /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)\n'
+  day.editors = ['/Applications/Visual Studio Code.app']
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+
+  await ui.press({ key: 'focus-s1' })
+  expect(day.opened).toEqual([['/usr/bin/open', '-a', '/Applications/Visual Studio Code.app', '/p/coachcard']])
+  await ui.press({ key: 'focus-bg-full' })
+  expect(await ui.find({ type: 'Text', text: /nightly-qa runs in the background, with no window: claude attach bg1 opens it/ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('an empty day says so', async ($, on) => {
@@ -279,7 +308,7 @@ test('the session list opens from its header and offers Stop on background sessi
     const ui = await $.ui.mount(PANE(surface))
     // Open by default.
     expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 3 · 2 busy')
-    expect((await ui.find({ key: 'mention-bg-full' }))?.props.label).toMatch(/^\S+ nightly-qa$/)
+    expect((await ui.find({ key: 'mention-bg-full' }))?.props.label).toBe('nightly-qa')
     expect(await ui.find({ type: 'Text', text: /this session/ })).toBeDefined()
     expect(await ui.find({ key: 'stop-bg1' })).toBeDefined()
     // No Stop for interactive sessions, this one included.
