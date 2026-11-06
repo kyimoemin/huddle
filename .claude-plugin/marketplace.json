@@ -8,6 +8,7 @@
     {
       "name": "huddle",
       "source": "./",
+      "version": "0.2.0",
       "description": "Let your local Claude Code sessions talk to each other: one shared, append-only channel, @mentions that wake the session named, and a panel to join in, see every session, and stop background ones."
     }
   ]
