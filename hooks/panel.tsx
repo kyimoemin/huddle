@@ -27,6 +27,12 @@ const MAX_POST_ROWS = 3
 const MIN_REMOTE_POST_ROWS = 2
 /** Columns of the pane the post box's own chrome takes (its prompt mark and `post` label). */
 const POST_CHROME = 8
+/**
+ * Columns the post row takes beside the field: the `@` button and its gap,
+ * and off the terminal the border, padding and Send button too.
+ */
+const TERMINAL_ROW_CHROME = 2
+const REMOTE_ROW_CHROME = 13
 /** The session list's header row: its toggle, filter and counts. */
 const HEADER_ROWS = 1
 /** The `── Today ──` rule between the list and the feed. */
@@ -44,7 +50,7 @@ const MAX_SUGGESTIONS = 5
 /** Columns a post of yours is held in from the left, so it reads as yours. */
 const OWN_INDENT = 6
 /** Columns an author's posts are held in under their avatar, off the terminal. */
-const AVATAR_INDENT = 4
+const AVATAR_INDENT = 6
 /** Author colours: one per name, the same in every panel. */
 const AUTHOR_COLORS = ['#e07a5f', '#81b29a', '#e9c46a', '#7aa2f7', '#bb9af7', '#7dcfff', '#ff9e64', '#9ece6a']
 
@@ -292,6 +298,12 @@ function noteTyping($: $, text: string): Promise<void> {
   return typingQueue
 }
 let typingQueue: Promise<void> = Promise.resolve()
+
+/** Posts what the box holds, once every keystroke before the press is noted. */
+async function sendTyped($: $): Promise<void> {
+  await typingQueue
+  await submit($, await read($, typing))
+}
 
 /** Puts `text` in the post box, replacing what the person typed. */
 async function setPostBox($: $, text: string): Promise<void> {
@@ -557,12 +569,12 @@ export function registerPanel(on: On): void {
     // Wide, the sessions sit in a sidebar and the feed takes the rest.
     const isWide = e.props.bodyColumns >= WIDE_COLUMNS
     const columns = isWide ? e.props.bodyColumns - SIDEBAR_COLUMNS - 1 : e.props.bodyColumns
-    paneColumns = columns
+    paneColumns = columns - (isTerminal ? TERMINAL_ROW_CHROME : REMOTE_ROW_CHROME)
 
     // The session list: the active sessions, the idle ones folded into one row unless All is picked.
     const active = everyone.filter((peer) => isActive(peer, selfId))
     const idle = everyone.filter((peer) => !isActive(peer, selfId))
-    const candidates = filter === 'active' ? active : [...active, ...idle]
+    const candidates = filter === 'active' ? active : everyone
     const hasFold = isListOpen && filter === 'active' && idle.length > 0
     const peerRows = isTerminal ? 1 : 2
     // The list takes at most half the pane; the rest is the feed's.
@@ -584,7 +596,9 @@ export function registerPanel(on: On): void {
     const hintRows = isTerminal ? 0 : 1
 
     const authorOf = (name: string) => [authorIcon(name, everyone), name].filter(Boolean).join(' ')
-    const widthOf = (name: string) => Math.max(1, name === 'you' ? columns - OWN_INDENT : isTerminal ? columns : columns - AVATAR_INDENT)
+    // Off the terminal your bubble's padding takes a column each side.
+    const widthOf = (name: string) =>
+      Math.max(1, name === 'you' ? columns - OWN_INDENT - (isTerminal ? 0 : 2) : isTerminal ? columns : columns - AVATAR_INDENT)
     const layoutOf = (post: GroupPost, name: string) => postLayout('', post.body, widthOf(name), opened.has(post.line))
     const shown = fitGroups(groupPosts(lines), Math.max(1, bodyRows - BELOW_FEED - (rows - 1) - listRows - pickRows - hintRows), {
       // Yours end in their time; another author's start with a header.
@@ -593,9 +607,14 @@ export function registerPanel(on: On): void {
       raw: (line) => Math.max(1, Math.ceil([...line].length / Math.max(1, columns))),
     })
 
-    const working = everyone.filter((peer) => statusWord(peer) === 'working').length
-    const waiting = everyone.filter((peer) => !['working', 'idle'].includes(statusWord(peer))).length
-    const resting = everyone.length - working - waiting
+    const byStatus = {
+      working: everyone.filter((peer) => statusWord(peer) === 'working'),
+      waiting: everyone.filter((peer) => !['working', 'idle'].includes(statusWord(peer))),
+      idle: everyone.filter((peer) => statusWord(peer) === 'idle'),
+    }
+    const working = byStatus.working.length
+    const waiting = byStatus.waiting.length
+    const resting = byStatus.idle.length
     const talks = conversations(everyone, now)
 
     const body = (text: string) =>
@@ -605,7 +624,8 @@ export function registerPanel(on: On): void {
             {chunk.text}
           </Text>
         ) : (
-          splitMentions(chunk.text).map((part, j) =>
+          // After a code span a chunk starts mid-word: an `@` there is no mention, as delivery reads it.
+          (c > 0 ? splitMentions(`x${chunk.text}`).map((part, j) => (j === 0 ? { text: part.text.slice(1) } : part)) : splitMentions(chunk.text)).map((part, j) =>
             part.isMention ? (
               <Text key={`m-${c}-${j}`} bold color="warning">
                 {part.text}
@@ -631,10 +651,54 @@ export function registerPanel(on: On): void {
         ? read($, typing).then((text) => setPostBox($, addMention(text, peer.name)))
         : say($, `${peer.name} can't be @mentioned: a mention is letters, digits, . _ and -`))
 
-    const peerRow = (peer: Peer) => {
-      const isSelf = peer.sessionId === selfId
+    // The parts a session row has in both layouts: the list's and the wide sidebar's.
+    const statusDot = (peer: Peer) => {
       const word = statusWord(peer)
-      const { percent, tokens, estimated } = peer.context ?? {}
+      return <Text color={statusColor(word)}>{word === 'idle' ? '○' : '●'}</Text>
+    }
+    const focusButton = (peer: Peer) => (
+      <Button
+        key={`focus-${peer.sessionId}`}
+        plain
+        label={isTerminal ? sessionIcon(peer.sessionId) : `Show ${peer.name}`}
+        onPress={() =>
+          void focusPeer($, peer)
+            .then((problem) => (problem ? say($, problem) : undefined))
+            .catch(() => {})
+        }
+      >
+        {avatar(peer.name, peer.sessionId)}
+      </Button>
+    )
+    const mentionButton = (peer: Peer) => (
+      <Button key={`mention-${peer.sessionId}`} plain dimColor={statusWord(peer) === 'idle'} label={peer.name} onPress={() => mention(peer)} />
+    )
+    const youBadge = (peer: Peer) =>
+      peer.sessionId === selfId && (
+        <Text backgroundColor="suggestion" color="inverseText" size="caption" weight="semibold">
+          YOU
+        </Text>
+      )
+    const stopButton = (peer: Peer) =>
+      peer.kind === 'background' &&
+      peer.id &&
+      peer.sessionId !== selfId && <Button key={`stop-${peer.id}`} label="stop" onPress={() => void stopPeer($, peer)} />
+    const percentText = (peer: Peer) => {
+      const { percent, estimated } = peer.context ?? {}
+      const isFull = percent !== undefined && percent >= CONTEXT_WARN
+      return (
+        percent !== undefined && (
+          <Text tabular mono dimColor={!isFull} color={isFull ? 'warning' : undefined}>
+            {estimated ? '~' : ''}
+            {percent}%
+          </Text>
+        )
+      )
+    }
+
+    const peerRow = (peer: Peer) => {
+      const word = statusWord(peer)
+      const { percent, tokens } = peer.context ?? {}
       const talk = talks.get(peer.sessionId)
       const isFull = percent !== undefined && percent >= CONTEXT_WARN
       const effort = effortBadge(peer.effort)
@@ -646,27 +710,12 @@ export function registerPanel(on: On): void {
       )
       return (
         <Box key={`peer-${peer.sessionId}`} flexDirection="row" gap={1} alignItems="center">
-          <Text color={statusColor(word)}>{word === 'idle' ? '○' : '●'}</Text>
-          <Button
-            key={`focus-${peer.sessionId}`}
-            plain
-            label={isTerminal ? sessionIcon(peer.sessionId) : `Show ${peer.name}`}
-            onPress={() =>
-              void focusPeer($, peer)
-                .then((problem) => (problem ? say($, problem) : undefined))
-                .catch(() => {})
-            }
-          >
-            {avatar(peer.name, peer.sessionId)}
-          </Button>
+          {statusDot(peer)}
+          {focusButton(peer)}
           <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
             <Box flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-              <Button key={`mention-${peer.sessionId}`} plain dimColor={word === 'idle'} label={peer.name} onPress={() => mention(peer)} />
-              {isSelf && (
-                <Text backgroundColor="suggestion" color="inverseText" size="caption" weight="semibold">
-                  YOU
-                </Text>
-              )}
+              {mentionButton(peer)}
+              {youBadge(peer)}
               {isTerminal && meta}
               {talk && (
                 <Text color="suggestion">
@@ -678,9 +727,7 @@ export function registerPanel(on: On): void {
                     .join(' ')}
                 </Text>
               )}
-              {peer.kind === 'background' && peer.id && !isSelf && (
-                <Button key={`stop-${peer.id}`} label="stop" onPress={() => void stopPeer($, peer)} />
-              )}
+              {stopButton(peer)}
             </Box>
             {!isTerminal && meta}
           </Box>
@@ -699,12 +746,7 @@ export function registerPanel(on: On): void {
             )}
           </Box>
           <Box width={PERCENT_COLUMNS} flexShrink={0} justifyContent="flex-end">
-            {percent !== undefined && (
-              <Text tabular mono dimColor={!isFull} color={isFull ? 'warning' : undefined}>
-                {estimated ? '~' : ''}
-                {percent}%
-              </Text>
-            )}
+            {percentText(peer)}
           </Box>
           <Box width={AGE_COLUMNS} flexShrink={0} justifyContent="flex-end">
             {peer.startedAt ? (
@@ -801,7 +843,7 @@ export function registerPanel(on: On): void {
       </Text>
     )
 
-    const sessionList = (
+    const sessionList = () => (
       <Box key="sessions" flexDirection="column" flexShrink={0}>
           <Box key="sessions-header" flexDirection="row" gap={1} alignItems="center">
             <Button
@@ -849,68 +891,42 @@ export function registerPanel(on: On): void {
     )
 
     // The wide layout's sidebar: every session, grouped by what it is doing.
-    const sideRow = (peer: Peer) => {
-      const word = statusWord(peer)
-      const { percent, estimated } = peer.context ?? {}
-      const isFull = percent !== undefined && percent >= CONTEXT_WARN
-      return (
-        <Box key={`peer-${peer.sessionId}`} flexDirection="row" gap={1} alignItems="center">
-          <Text color={statusColor(word)}>{word === 'idle' ? '○' : '●'}</Text>
-          <Button
-            key={`focus-${peer.sessionId}`}
-            plain
-            label={isTerminal ? sessionIcon(peer.sessionId) : `Show ${peer.name}`}
-            onPress={() =>
-              void focusPeer($, peer)
-                .then((problem) => (problem ? say($, problem) : undefined))
-                .catch(() => {})
-            }
-          >
-            {avatar(peer.name, peer.sessionId)}
-          </Button>
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-            <Box flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-              <Button key={`mention-${peer.sessionId}`} plain dimColor={word === 'idle'} label={peer.name} onPress={() => mention(peer)} />
-              {peer.sessionId === selfId && (
-                <Text backgroundColor="suggestion" color="inverseText" size="caption" weight="semibold">
-                  YOU
-                </Text>
-              )}
-              {peer.kind === 'background' && peer.id && peer.sessionId !== selfId && (
-                <Button key={`stop-${peer.id}`} label="stop" onPress={() => void stopPeer($, peer)} />
-              )}
-            </Box>
-            {!isTerminal && (
-              <Text dimColor size="caption" wrap="truncate">
-                {[peer.project ?? '', peer.startedAt ? ago(now - peer.startedAt) : ''].filter(Boolean).join(' · ')}
-              </Text>
-            )}
+    const sideRow = (peer: Peer) => (
+      <Box key={`peer-${peer.sessionId}`} flexDirection="row" gap={1} alignItems="center">
+        {statusDot(peer)}
+        {focusButton(peer)}
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+          <Box flexDirection="row" gap={1} minWidth={0} overflow="hidden">
+            {mentionButton(peer)}
+            {youBadge(peer)}
+            {stopButton(peer)}
           </Box>
-          {percent !== undefined && (
-            <Text tabular mono dimColor={!isFull} color={isFull ? 'warning' : undefined}>
-              {estimated ? '~' : ''}
-              {percent}%
+          {!isTerminal && (
+            <Text dimColor size="caption" wrap="truncate">
+              {[peer.project ?? '', peer.startedAt ? ago(now - peer.startedAt) : ''].filter(Boolean).join(' · ')}
             </Text>
           )}
         </Box>
-      )
-    }
+        {percentText(peer)}
+      </Box>
+    )
     const sideGroups = [
-      { title: 'WORKING', color: 'suggestion', peers: everyone.filter((peer) => statusWord(peer) === 'working') },
-      { title: 'WAITING', color: 'warning', peers: everyone.filter((peer) => !['working', 'idle'].includes(statusWord(peer))) },
-      { title: 'IDLE', color: 'inactive', peers: everyone.filter((peer) => statusWord(peer) === 'idle') },
+      { title: 'WORKING', color: 'suggestion', peers: byStatus.working },
+      { title: 'WAITING', color: 'warning', peers: byStatus.waiting },
+      { title: 'IDLE', color: 'inactive', peers: byStatus.idle },
     ].filter((group) => group.peers.length > 0)
-    // Rows the sidebar has for its groups: the pane less its title, a row kept for `+N more`.
-    let sideRoom = Math.max(1, Math.floor((bodyRows - 2) / peerRows))
+    // Rows the sidebar has for its groups: the pane less its title and a row kept for `+N more`.
+    let sideRoom = Math.max(1, bodyRows - 2)
     let sideHidden = 0
-    const sidebar = (
+    const sidebar = () => (
       <Box key="sidebar" flexDirection="column" width={SIDEBAR_COLUMNS} flexShrink={0} gap={isTerminal ? 0 : 'sm'} overflow="hidden">
         <Text weight="semibold" size="heading">
           <Text dimColor>#</Text> huddle
         </Text>
         {sideGroups.map((group) => {
-          const fit = group.peers.slice(0, Math.max(0, sideRoom - 1))
-          sideRoom -= fit.length + 1
+          // A group's header takes a row; each session, peerRows.
+          const fit = group.peers.slice(0, Math.max(0, Math.floor((sideRoom - 1) / peerRows)))
+          if (fit.length > 0) sideRoom -= 1 + fit.length * peerRows
           sideHidden += group.peers.length - fit.length
           return (
             fit.length > 0 && (
@@ -964,7 +980,7 @@ export function registerPanel(on: On): void {
               paddingX={isTerminal ? 0 : 1}
             >
               <Text dimColor size="caption">
-                {query === '' ? 'Mention a session' : `Sessions matching “${query}”`} · ↑ to pick
+                {query === '' ? 'Mention a session' : `Sessions matching “${query}”`}
               </Text>
               {picks.map((peer) => {
                 const tag = handle(peer.name)
@@ -1035,7 +1051,7 @@ export function registerPanel(on: On): void {
               }
             />
             {!isTerminal && (
-              <Button key="send" variant="primary" label="Send" onPress={() => void read($, typing).then((text) => submit($, text))} />
+              <Button key="send" variant="primary" label="Send" onPress={() => void sendTyped($)} />
             )}
           </Box>
         {!isTerminal && (
@@ -1051,12 +1067,12 @@ export function registerPanel(on: On): void {
     // proportional text and margins).
     return isWide ? (
       <Box flexDirection="row" gap={1} height={isTerminal ? undefined : '100%'}>
-        {sidebar}
+        {sidebar()}
         {main}
       </Box>
     ) : (
       <Box flexDirection="column" height={isTerminal ? undefined : '100%'}>
-        {sessionList}
+        {sessionList()}
         {main}
       </Box>
     )

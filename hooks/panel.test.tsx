@@ -884,3 +884,26 @@ test('a wide pane puts every session in a sidebar, grouped by what it is doing',
     await ui.unmount()
   }
 })
+
+test('All keeps the list order: background first, then newest', async ($, on) => {
+  world(on)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  await ui.press({ key: 'filter-all' })
+  const keys = (await ui.findAll({ type: 'Button' })).map((button) => button.key).filter((key) => key?.startsWith('mention-') && key !== 'mention-picker')
+  expect(keys).toEqual(['mention-bg-full', 'mention-s1', 'mention-sid'])
+  await ui.unmount()
+})
+
+test('an @ right after a code span is no mention, as delivery reads it', async ($, on) => {
+  const day = world(on)
+  day.lines = ['- 14:34 **huddle-5a**: run `x`@foo then @bar']
+  day.mtimeMs = 1
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  expect(await ui.find({ type: 'Text', text: /^@foo$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^@bar$/ })).toBeDefined()
+  await ui.unmount()
+})
