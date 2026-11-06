@@ -14,6 +14,8 @@ import {
   resolveMentions,
   type SessionRow,
   tailFile,
+  transcriptFile,
+  lastContextTokens,
   type Run,
 } from './huddle'
 import { absolute } from './guard'
@@ -220,45 +222,136 @@ export async function contextDir($: $): Promise<string> {
 
 const isFileSafe = (id: string) => /^[\w-]+$/.test(id)
 
-/** Writes this session's context fill, a whole percentage, for every panel to read. */
-export async function publishContext($: $, percent: number): Promise<void> {
-  const id = await $.session.id()
-  if (!isFileSafe(id)) return
-  await $.fs.write(`${await contextDir($)}/${id}.json`, JSON.stringify({ percent: Math.round(percent), at: Date.now() }))
+/** What a session with huddle loaded publishes about itself, in `<contextDir>/<sessionId>.json`. */
+export type Status = {
+  /** Context fill, a whole percentage. */
+  percent?: number
+  tokens?: number
+  /** The context window, so other sessions on `model` can be measured against it. */
+  window?: number
+  model?: string
+  /** Its last post through the post tool, and the names that post mentioned. */
+  post?: { at: number; to: string[] }
+  at: number
 }
 
-/** Removes an ending session's context file. Best effort. */
+/** This session's status as last written; the id changes on /clear. */
+let own: { id: string; status: Status } | undefined
+
+/** Merges `patch` into this session's status file. */
+export function publishStatus($: $, patch: Omit<Partial<Status>, 'at'>): Promise<void> {
+  // One at a time: a turn's figure and a post can land together, and each
+  // write must carry the other's fields and land in order.
+  const run = writing.then(() => writeStatus($, patch))
+  writing = run.catch(() => {})
+  return run
+}
+
+let writing: Promise<void> = Promise.resolve()
+
+async function writeStatus($: $, patch: Omit<Partial<Status>, 'at'>): Promise<void> {
+  const id = await $.session.id()
+  if (!isFileSafe(id)) return
+  const file = `${await contextDir($)}/${id}.json`
+  if (own?.id !== id) {
+    // After a reload, keep what the file already says (the last post).
+    let kept: Status = { at: 0 }
+    try {
+      const parsed = JSON.parse(String(await $.fs.read(file))) as unknown
+      if (typeof parsed === 'object' && parsed !== null) kept = parsed as Status
+    } catch {
+      // No file yet.
+    }
+    own = { id, status: kept }
+  }
+  own.status = { ...own.status, ...patch, at: Date.now() }
+  await $.fs.write(file, JSON.stringify(own.status))
+}
+
+/** Publishes this session's context fill, with its window and model. */
+export async function publishContext($: $, context: { percent?: number; tokens?: number; window: number }): Promise<void> {
+  if (context.percent === undefined) return
+  let model: string | undefined
+  try {
+    model = await $.session.model()
+  } catch {
+    // The figure stands without it.
+  }
+  await publishStatus($, {
+    percent: Math.round(context.percent),
+    ...(context.tokens !== undefined ? { tokens: context.tokens } : {}),
+    window: context.window,
+    ...(model ? { model } : {}),
+  })
+}
+
+/** Removes an ending session's status file. Best effort. */
 export async function unpublishContext($: $, id: string): Promise<void> {
   if (!isFileSafe(id)) return
+  if (own?.id === id) own = undefined
   await $.process.run(['/bin/rm', '-f', `${await contextDir($)}/${id}.json`], { timeoutMs: 2000 })
 }
 
-const fills = new Map<string, { mtimeMs: number; percent: number | undefined }>()
+/** What the panel shows of a session beside its name. */
+export type PeerStatus = {
+  /** `estimated` when read off its transcript: it has no huddle loaded. No `percent` when its window is unknown. */
+  context?: { percent?: number; tokens?: number; estimated?: true }
+  post?: { at: number; to: string[] }
+}
+
+const statuses = new Map<string, { mtimeMs: number; status: Status }>()
+const transcripts = new Map<string, { mtimeMs: number; readAt: number; tokens?: number; model?: string }>()
+const TRANSCRIPT_REREAD_MS = 10_000
 /** How often, and past what age, the files of sessions no longer running are removed. */
 const SWEEP_MS = 60 * 60_000
 const STALE_MS = 24 * 60 * 60_000
+/** How much of a transcript's end is read for its last reply. */
+const TRANSCRIPT_TAIL_BYTES = 262_144
 let lastSweep = 0
 
+const clampPercent = (value: unknown) =>
+  typeof value === 'number' && Number.isFinite(value) ? Math.min(100, Math.max(0, Math.round(value))) : undefined
+
+function parseStatus(text: string): Status | undefined {
+  const parsed = JSON.parse(text) as Record<string, unknown>
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const status: Status = { at: typeof parsed.at === 'number' ? parsed.at : 0 }
+  const percent = clampPercent(parsed.percent)
+  if (percent !== undefined) status.percent = percent
+  if (typeof parsed.tokens === 'number') status.tokens = parsed.tokens
+  if (typeof parsed.window === 'number' && parsed.window > 0) status.window = parsed.window
+  if (typeof parsed.model === 'string') status.model = parsed.model
+  const post = parsed.post as { at?: unknown; to?: unknown } | undefined
+  if (post && typeof post.at === 'number' && Array.isArray(post.to)) {
+    status.post = { at: post.at, to: post.to.filter((name): name is string => typeof name === 'string') }
+  }
+  return status
+}
+
 /**
- * Each listed session's context fill, by session id, from the files the
- * sessions write. One listing per call; a file is read again only when its
- * mtime moved. A session without huddle loaded has no file, so no figure.
+ * Each listed session's status, by session id. A session with huddle loaded
+ * says it in its file (one listing per call; a file is read again only when
+ * its mtime moved). One without huddle has its context read off its
+ * transcript's last reply, as a percentage where a huddle session on the same
+ * model gives the window, else as tokens.
  */
-export async function contextFills($: $, sessionIds: readonly string[]): Promise<Map<string, number>> {
-  const out = new Map<string, number>()
+export async function peerStatuses($: $, rows: readonly SessionRow[]): Promise<Map<string, PeerStatus>> {
+  const out = new Map<string, PeerStatus>()
   const dir = await contextDir($)
-  let entries: { name: string; mtimeMs: number }[]
+  let entries: { name: string; mtimeMs: number }[] = []
   try {
     entries = await $.fs.list(dir)
   } catch {
-    return out
+    // No session has published yet: transcripts only.
   }
+  const ids = rows.map((row) => row.sessionId)
   const mtimes = new Map(entries.map((entry) => [entry.name, entry.mtimeMs]))
-  const listed = new Set(sessionIds.map((id) => `${id}.json`))
+  const listed = new Set(ids.map((id) => `${id}.json`))
   // Forget what is no longer listed, and once in a while remove the files of
   // sessions that ended without removing their own (a crash, a kill).
-  for (const name of fills.keys()) if (!listed.has(name)) fills.delete(name)
-  if (sessionIds.length > 0 && !sessionIds.some((id) => id.startsWith('ref:')) && Date.now() - lastSweep > SWEEP_MS) {
+  for (const name of statuses.keys()) if (!listed.has(name)) statuses.delete(name)
+  for (const id of transcripts.keys()) if (!ids.includes(id)) transcripts.delete(id)
+  if (ids.length > 0 && !ids.some((id) => id.startsWith('ref:')) && Date.now() - lastSweep > SWEEP_MS) {
     lastSweep = Date.now()
     const stale = entries.filter(
       (entry) => entry.name.endsWith('.json') && !listed.has(entry.name) && Date.now() - entry.mtimeMs > STALE_MS,
@@ -267,24 +360,94 @@ export async function contextFills($: $, sessionIds: readonly string[]): Promise
       void $.process.run(['/bin/rm', '-f', ...stale.map((entry) => `${dir}/${entry.name}`)], { timeoutMs: 5000 }).catch(() => {})
     }
   }
-  for (const id of sessionIds) {
+
+  const published = new Map<string, Status>()
+  for (const id of ids) {
     const name = `${id}.json`
     const mtimeMs = mtimes.get(name)
     if (mtimeMs === undefined) continue
-    let known = fills.get(name)
+    let known = statuses.get(name)
     if (known?.mtimeMs !== mtimeMs) {
-      let percent: number | undefined
       try {
-        const value = (JSON.parse(String(await $.fs.read(`${dir}/${name}`))) as { percent?: unknown }).percent
-        if (typeof value === 'number' && Number.isFinite(value)) percent = Math.min(100, Math.max(0, Math.round(value)))
+        const status = parseStatus(String(await $.fs.read(`${dir}/${name}`)))
+        // A failed read is tried again next time.
+        if (status) statuses.set(name, (known = { mtimeMs, status }))
       } catch {
         // Half-written or not ours: no figure this time.
       }
-      known = { mtimeMs, percent }
-      // A failed read is tried again next time.
-      if (percent !== undefined) fills.set(name, known)
     }
-    if (known.percent !== undefined) out.set(id, known.percent)
+    // The last good read stands while a newer one fails.
+    if (known) published.set(id, known.status)
   }
+
+  const windows = new Map<string, number>()
+  // One model id can run with different windows: the smallest known one never shows a session emptier than it is.
+  for (const { model, window } of published.values()) {
+    if (model && window) windows.set(modelFamily(model), Math.min(window, windows.get(modelFamily(model)) ?? Infinity))
+  }
+
+  const configDir = await transcriptsRoot($)
+  await Promise.all(rows.map(async (row) => {
+    const status = published.get(row.sessionId)
+    const peer: PeerStatus = {}
+    if (status?.post) peer.post = status.post
+    if (status?.percent !== undefined) {
+      peer.context = { percent: status.percent, ...(status.tokens !== undefined ? { tokens: status.tokens } : {}) }
+    } else if (row.cwd && configDir && isFileSafe(row.sessionId)) {
+      const read = await transcriptTokens($, transcriptFile(configDir, row.cwd, row.sessionId), row.sessionId)
+      if (read?.tokens !== undefined) {
+        const window = read.model ? windows.get(modelFamily(read.model)) : undefined
+        const percent = window && read.tokens <= window ? clampPercent((read.tokens / window) * 100) : undefined
+        peer.context = { ...(percent !== undefined ? { percent } : {}), tokens: read.tokens, estimated: true }
+      }
+    }
+    if (peer.context || peer.post) out.set(row.sessionId, peer)
+  }))
   return out
+}
+
+/**
+ * A model as both spellings reduce to: `/model`'s (`Opus 5.5`,
+ * `claude-opus-5-5[1m]`) and a transcript's API id (`claude-opus-5-5`,
+ * `claude-haiku-4-5-20251001`) both become `opus-5-5` / `haiku-4-5`.
+ */
+export function modelFamily(model: string): string {
+  return model
+    .toLowerCase()
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-*(claude-)?|-*$/g, '')
+    .replace(/-\d{8}$/, '')
+}
+
+/** Where transcripts live: `$CLAUDE_CONFIG_DIR`, else ~/.claude. */
+async function transcriptsRoot($: $): Promise<string | undefined> {
+  const configured = await $.env.get('CLAUDE_CONFIG_DIR')
+  if (configured) return configured
+  const home = await $.env.get('HOME')
+  return home ? `${home}/.claude` : undefined
+}
+
+/** A transcript's last reply, read again only when the file changed. */
+async function transcriptTokens($: $, file: string, id: string): Promise<{ tokens?: number; model?: string } | undefined> {
+  let mtimeMs: number
+  try {
+    mtimeMs = (await $.fs.stat(file)).mtimeMs
+  } catch {
+    return undefined
+  }
+  const known = transcripts.get(id)
+  // A busy session's transcript moves every tick: read it at most every 10s.
+  const now = await $.clock.now()
+  if (known && (known.mtimeMs === mtimeMs || now - known.readAt < TRANSCRIPT_REREAD_MS)) return known
+  try {
+    const { exitCode, stdout } = await $.process.run(['/usr/bin/tail', '-c', String(TRANSCRIPT_TAIL_BYTES), file], { timeoutMs: 3000 })
+    if (exitCode !== 0) return known
+    const last = lastContextTokens(stdout)
+    const read = { mtimeMs, readAt: now, ...(last ?? {}) }
+    transcripts.set(id, read)
+    return read
+  } catch {
+    return known
+  }
 }

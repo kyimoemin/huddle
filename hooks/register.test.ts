@@ -1,3 +1,4 @@
+import { modelFamily } from './channel'
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import { POST_TOOL, READ_TOOL, SECTION_TEXT } from './register'
@@ -31,6 +32,7 @@ function engine(
     value:
       e.name === 'HOME' ? '/h' : e.name === 'HUDDLE_DIR' ? huddleDirEnv : e.name === 'CLAUDE_CODE_EXECPATH' ? cli.execPath : undefined,
   }))
+  on('clock.now', () => ({ value: Date.now() }))
   on('session.id', () => ({ value: 'sid' }))
   on('session.cwd', () => ({ value: cli.cwd?.() ?? '/Users/me/Projects/huddle' }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
@@ -107,7 +109,8 @@ test('a relative HUDDLE_DIR is taken from the working directory, the context fil
   await $.session.measure({ context: { window: 200_000, percent: 3 }, rateLimits: [], changed: ['context'] })
 
   expect(runs.find((argv) => argv[0] === '/bin/sh')![6]).toBe('/Users/me/Projects/huddle/scratch/chan')
-  expect(paths).toEqual(['/Users/me/Projects/huddle/scratch/huddle-context/sid.json'])
+  // The post and the turn both write this session's status file.
+  expect([...new Set(paths)]).toEqual(['/Users/me/Projects/huddle/scratch/huddle-context/sid.json'])
 })
 
 test('post refuses empty text without writing', async ($, on) => {
@@ -435,7 +438,7 @@ test("each turn's context fill is written for the panels; the session's end remo
   await $.session.start({ cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true })
   // A resumed session reports what it already holds.
   expect(writes.map((w) => w.path)).toEqual(['/h/.claude/huddle-context/sid.json'])
-  expect(JSON.parse(writes[0]!.text).percent).toBe(12)
+  expect(JSON.parse(writes[0]!.text)).toMatchObject({ percent: 12, window: 200_000 })
 
   await $.session.measure({ context: { window: 200_000, tokens: 84_600, percent: 42.3 }, rateLimits: [], changed: ['context'] })
   expect(JSON.parse(writes.at(-1)!.text).percent).toBe(42)
@@ -473,4 +476,31 @@ test('a relative HUDDLE_DIR stays on the first folder as the cwd moves, and the 
   // From /q, the guard still guards /p/scratch/chan, and not /q's.
   const write = await $.tool.call({ tool: 'Write', file_path: '/p/scratch/chan/x.md', content: 'forged' })
   expect(write.deny).toContain('append-only')
+})
+
+test('a post through the tool records whom it mentioned in the status file; a later turn keeps it', async ($, on) => {
+  engine(on)
+  const writes: { path: string; text: string }[] = []
+  on('fs.write', (_, e) => {
+    writes.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  await $.session.start({ cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: POST_TOOL, text: '@coachcard-1e @sprint-25 ready' })
+  expect(JSON.parse(writes.at(-1)!.text).post.to).toEqual(['coachcard-1e', 'sprint-25'])
+
+  await $.session.measure({ context: { window: 1_000_000, tokens: 50_000, percent: 5 }, rateLimits: [], changed: ['context'] })
+  expect(JSON.parse(writes.at(-1)!.text)).toMatchObject({
+    percent: 5,
+    tokens: 50_000,
+    window: 1_000_000,
+    model: 'claude-opus-5-5',
+    post: { to: ['coachcard-1e', 'sprint-25'] },
+  })
+})
+
+test('/model\'s spelling and the API id reduce to one family', () => {
+  expect(['Opus 5.5', 'claude-opus-5-5', 'claude-opus-5-5[1m]'].map(modelFamily)).toEqual(['opus-5-5', 'opus-5-5', 'opus-5-5'])
+  expect(modelFamily('claude-haiku-4-5-20251001')).toBe('haiku-4-5')
 })

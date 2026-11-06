@@ -17,8 +17,15 @@ export type Peer = {
   /** The short id `claude stop` takes; background sessions only. */
   id?: string
   startedAt?: number
-  /** How full its context window is, 0 to 100; only sessions with huddle loaded report it. */
-  context?: number
+  /** The name of its working folder. */
+  project?: string
+  /**
+   * How full its context window is. `estimated` when read off its transcript
+   * (no huddle loaded there); no `percent` when its window is unknown.
+   */
+  context?: { percent?: number; tokens?: number; estimated?: true }
+  /** Its last post through huddle, and the names it mentioned. */
+  post?: { at: number; to: string[] }
 }
 
 declare module 'claude-code' {

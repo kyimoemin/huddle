@@ -1,7 +1,14 @@
 import { expect, test } from 'claude-code/testing'
 import {
   MAX_POST,
+  addMention,
   appendLine,
+  compactTokens,
+  handle,
+  isMentionable,
+  lastContextTokens,
+  sessionIcon,
+  transcriptFile,
   cleanName,
   cleanText,
   dayFile,
@@ -201,4 +208,52 @@ test("the person can mention this session from its own panel; a session can't me
     unknown: [],
   })
   expect(resolveMentions(['huddle-5a'], ROWS, 'me')).toEqual({ targets: [], unknown: [] })
+})
+
+test('a name with spaces is mentioned with dashes; the plain name still works', () => {
+  expect(handle(' sprint  25 ')).toBe('sprint-25')
+  const rows = [{ sessionId: 's1', name: 'sprint 25' }, { sessionId: 's2', name: 'huddle-5a' }]
+  expect(resolveMentions(parseMentions('@Sprint-25 and @huddle-5a'), rows, 'me').targets.map((t) => t.sessionId)).toEqual(['s1', 's2'])
+})
+
+test('addMention appends @handle once, spaced from what is typed', () => {
+  expect(addMention('', 'sprint 25')).toBe('@sprint-25 ')
+  expect(addMention('hey', 'b')).toBe('hey @b ')
+  expect(addMention('hey ', 'b')).toBe('hey @b ')
+  expect(addMention('hey @B ', 'b')).toBe('hey @B ')
+})
+
+test('a session keeps one icon, picked by its id', () => {
+  expect(sessionIcon('abc')).toBe(sessionIcon('abc'))
+  const icons = new Set(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map(sessionIcon))
+  expect(icons.size).toBeGreaterThan(3)
+})
+
+test('the transcript path is the cwd with every other character a dash', () => {
+  expect(transcriptFile('/h/.claude/', '/Users/me/my.proj', 'sid')).toBe('/h/.claude/projects/-Users-me-my-proj/sid.jsonl')
+})
+
+test("a transcript's context is its last main-thread reply's input tokens", () => {
+  const reply = (tokens: number, extra: object = {}) =>
+    JSON.stringify({
+      type: 'assistant',
+      ...extra,
+      message: { model: 'm1', usage: { input_tokens: 2, cache_read_input_tokens: tokens, cache_creation_input_tokens: 10, output_tokens: 5 } },
+    })
+  const text = ['{"cut', reply(100), JSON.stringify({ type: 'user' }), reply(900, { isSidechain: true }), ''].join('\n')
+  expect(lastContextTokens(text)).toEqual({ tokens: 112, model: 'm1' })
+  expect(lastContextTokens('{"type":"user"}\n')).toBeUndefined()
+})
+
+test('token counts are compact', () => {
+  expect(compactTokens(950)).toBe('950')
+  expect(compactTokens(114_247)).toBe('114k')
+  expect(compactTokens(1_000_000)).toBe('1M')
+  expect(compactTokens(1_250_000)).toBe('1.3M')
+})
+
+test('a name a mention cannot spell is not mentionable', () => {
+  expect(['sprint 25', 'huddle-5a', 'a.b'].map(isMentionable)).toEqual([true, true, true])
+  expect(['café', '_x', 'foo (2)', 'end-'].map(isMentionable)).toEqual([false, false, false, false])
+  expect(addMention('hi', 'café')).toBe('hi')
 })
