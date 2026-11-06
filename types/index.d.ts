@@ -32,8 +32,15 @@ declare module 'claude-code' {
   interface PluginState {
     huddle: {
       feed: Shaped<Feed>
-      /** What the post box holds, so it can be cleared after a post. */
+      /**
+       * What the pane last put in the post box (cleared after a post, a
+       * mention added); drawn as its `value`, so it changes only then.
+       */
       draft: string
+      /** What the post box holds as typed; nothing drawn reads it. */
+      typing: string
+      /** How many lines tall the post box is drawn, 1 to 3. */
+      postRows: number
       /** One dim line under the feed: what went wrong with the last post or stop. */
       notice: string
       /** The running sessions, this one included. */

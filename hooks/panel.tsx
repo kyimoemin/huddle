@@ -8,8 +8,12 @@ export const PANE = 'huddle'
 const TITLE = '#huddle'
 const POLL_MS = 2000
 const FEED_LINES = 200
-/** Rows the pane keeps below the feed: the notice and the post box. */
+/** Rows the pane keeps below the feed: the notice and a one-line post box. */
 const BELOW_FEED = 3
+/** The most lines the post box grows to before its text scrolls within. */
+const MAX_POST_ROWS = 3
+/** Columns of the pane the post box's own chrome takes (its prompt mark and `post` label). */
+const POST_CHROME = 8
 /** The session list's header row. */
 const HEADER_ROWS = 1
 
@@ -19,6 +23,8 @@ const feed = atom({ plugin: 'huddle', key: 'feed' } as const, { day: '', lines: 
   shape: 'feed-1',
 })
 const draft = atom({ plugin: 'huddle', key: 'draft' } as const, '')
+const typing = atom({ plugin: 'huddle', key: 'typing' } as const, '')
+const postRows = atom({ plugin: 'huddle', key: 'postRows' } as const, 1)
 const notice = atom({ plugin: 'huddle', key: 'notice' } as const, '')
 const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-3' })
 const showPeers = atom({ plugin: 'huddle', key: 'showPeers' } as const, true)
@@ -210,17 +216,45 @@ async function openPane($: $): Promise<boolean> {
   return isPlaced
 }
 
+/** The pane's width at its last draw, which sizes the post box. */
+let paneColumns = 80
+
+/** How many lines `text` takes in a post box `columns` wide: 1 to MAX_POST_ROWS. */
+export function postRowsFor(text: string, columns: number): number {
+  const width = Math.max(1, columns - POST_CHROME)
+  const lines = text.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil([...line].length / width)), 0)
+  return Math.min(MAX_POST_ROWS, lines)
+}
+
+/**
+ * Notes what the person typed. Nothing drawn reads it, so a keystroke redraws
+ * nothing: drawing each one back as `value` resets the field to a text one
+ * keystroke late, which drops the newest character and moves the cursor.
+ * Only a change in the box's height redraws.
+ */
+async function noteTyping($: $, text: string): Promise<void> {
+  await update($, typing, () => text)
+  const rows = postRowsFor(text, paneColumns)
+  if (rows !== (await read($, postRows))) await update($, postRows, () => rows)
+}
+
+/** Puts `text` in the post box, replacing what the person typed. */
+async function setPostBox($: $, text: string): Promise<void> {
+  await update($, draft, () => text)
+  await noteTyping($, text)
+}
+
 /** Posts what the person typed, signed `you`, and delivers its mentions. */
 export async function submit($: $, text: string): Promise<void> {
   if (text.trim() === '') return
-  await update($, draft, () => '')
+  await setPostBox($, '')
   try {
     const line = await post($, 'you', text)
     const mentions = await deliverMentions($, 'you', text, line, true)
     const problems = mentions.split('; ').filter((part) => part !== '' && !part.startsWith('notified '))
     await update($, notice, () => problems.join('; '))
   } catch (error) {
-    await update($, draft, () => text)
+    await setPostBox($, text)
     await update($, notice, () => `Not posted: ${errorText(error)}`)
   }
   await refresh($, true)
@@ -273,6 +307,7 @@ export function registerPanel(on: On): void {
     const { Box, Text, Input, Button } = $.ui.resolve(e)
     const { lines } = await read($, feed)
     const typed = await read($, draft)
+    const rows = await read($, postRows)
     const problem = await read($, notice)
     const everyone = await read($, peers)
     const isListOpen = await read($, showPeers)
@@ -280,12 +315,13 @@ export function registerPanel(on: On): void {
     const now = await $.clock.now()
 
     const bodyRows = e.props.scroll.bodyRows
+    paneColumns = e.props.bodyColumns
     // The list takes at most half the pane; the rest is the feed's.
     const listRoom = Math.max(1, Math.floor(bodyRows / 2) - HEADER_ROWS)
     const listed = isListOpen ? everyone.slice(0, everyone.length > listRoom ? listRoom - 1 : listRoom) : []
     const hidden = isListOpen ? everyone.length - listed.length : 0
     const listRows = HEADER_ROWS + listed.length + (hidden > 0 ? 1 : 0)
-    const shown = fitLines(lines, Math.max(1, bodyRows - BELOW_FEED - listRows), e.props.bodyColumns)
+    const shown = fitLines(lines, Math.max(1, bodyRows - BELOW_FEED - (rows - 1) - listRows), e.props.bodyColumns)
     const busy = everyone.filter((peer) => peer.status === 'busy').length
     const talks = conversations(everyone, now)
     const header = [`Sessions ${everyone.length}`, busy > 0 ? `${busy} busy` : '', talks.size > 0 ? `${talks.size} talking` : '']
@@ -316,7 +352,7 @@ export function registerPanel(on: On): void {
                 label={`${sessionIcon(peer.sessionId)} ${peer.name}`}
                 onPress={() =>
                   void (isMentionable(peer.name)
-                    ? update($, draft, (typed) => addMention(typed, peer.name))
+                    ? read($, typing).then((typed) => setPostBox($, addMention(typed, peer.name)))
                     : update($, notice, () => `${peer.name} can't be @mentioned: a mention is letters, digits, . _ and -`))
                 }
               />
@@ -380,8 +416,9 @@ export function registerPanel(on: On): void {
           key="post"
           placeholder="Post to #huddle; click a session or type @name to mention it"
           value={typed}
+          rows={rows}
           submitLabel="post"
-          onInput={(value) => void update($, draft, () => value)}
+          onInput={(value) => void noteTyping($, value)}
           onSubmit={(value) => void submit($, value)}
         />
       </Box>

@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { ago, bar, conversations, fitLines, parseRow, sortPeers, splitMentions } from './panel'
+import { ago, bar, conversations, fitLines, parseRow, postRowsFor, sortPeers, splitMentions } from './panel'
 
 const WHOLE = { isStdoutTruncated: false, isStderrTruncated: false }
 const START = { cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true } as const
@@ -499,6 +499,40 @@ test('clicking a session puts its @handle in the post box, once', async ($, on) 
     await ui.unmount()
   }
   expect(day.appended).toEqual([])
+})
+
+test('typing is not drawn back into the post box; it grows to three lines', async ($, on) => {
+  world(on)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  const box = async () => (await ui.find({ key: 'post' }))?.props
+
+  await ui.input({ key: 'post', text: 'h', kind: 'change' })
+  await ui.input({ key: 'post', text: 'hi', kind: 'change' })
+  // A keystroke drawn back resets the field one character late.
+  expect((await box())?.value).toBe('')
+  expect((await box())?.rows).toBe(1)
+
+  await ui.input({ key: 'post', text: 'one\ntwo', kind: 'change' })
+  expect((await box())?.rows).toBe(2)
+  await ui.input({ key: 'post', text: 'a\nb\nc\nd\ne', kind: 'change' })
+  expect((await box())?.rows).toBe(3)
+  expect((await box())?.value).toBe('')
+
+  await ui.press({ key: 'mention-s1' })
+  expect((await box())?.value).toBe('a\nb\nc\nd\ne @coachcard-1e ')
+  await ui.input({ key: 'post', text: '', kind: 'change' })
+  expect((await box())?.rows).toBe(1)
+  await ui.unmount()
+})
+
+test('postRowsFor counts wrapped and typed lines, at most three', () => {
+  expect(postRowsFor('', 40)).toBe(1)
+  expect(postRowsFor('x'.repeat(32), 40)).toBe(1)
+  expect(postRowsFor('x'.repeat(33), 40)).toBe(2)
+  expect(postRowsFor('a\nb', 40)).toBe(2)
+  expect(postRowsFor('x'.repeat(500), 40)).toBe(3)
 })
 
 test('the feed draws mentions apart and each author with its icon', async ($, on) => {
