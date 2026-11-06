@@ -1,26 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import {
-  ago,
-  authorColor,
-  barFill,
-  completeMention,
-  conversations,
-  fitGroups,
-  groupPosts,
-  groupTime,
-  initials,
-  mentionNotice,
-  mentionQueryOf,
-  parseRow,
-  postLayout,
-  postRowsFor,
-  sortPeers,
-  splitCode,
-  splitMentions,
-  statusWord,
-  suggest,
-} from './panel'
+import { ago, authorColor, barFill, mentionNotice, postLayout, conversations, fitLines, parseRow, postRowsFor, sortPeers, splitMentions } from './panel'
 
 const WHOLE = { isStdoutTruncated: false, isStderrTruncated: false }
 const START = { cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true } as const
@@ -183,6 +163,15 @@ test('a feed line splits into time, name and text', () => {
   expect(parseRow('something else')).toEqual({ raw: 'something else' })
 })
 
+test('fitLines keeps the newest lines that fit, counting wrapped rows', () => {
+  const lines = ['a'.repeat(25), 'b', 'c'.repeat(10)]
+  expect(fitLines(lines, 2, 10)).toEqual(['b', 'c'.repeat(10)])
+  expect(fitLines(lines, 5, 10)).toEqual(lines)
+  // The newest line shows even when it alone is taller than the room.
+  expect(fitLines(['x'.repeat(100)], 2, 10)).toEqual(['x'.repeat(100)])
+  expect(fitLines([], 5, 10)).toEqual([])
+})
+
 test("/huddle opens the pane showing today's posts, on every surface", async ($, on) => {
   const day = world(on)
   day.lines = ['- 14:32 **coachcard-1e**: QA is green', '- 14:35 **you**: @coachcard-1e which tests?']
@@ -224,7 +213,6 @@ test("a session's icon brings its window forward; a background one says it has n
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
 
-  await ui.press({ key: 'filter-all' })
   await ui.press({ key: 'focus-s1' })
   expect(day.opened).toEqual([['/usr/bin/open', '-a', '/Applications/Visual Studio Code.app', '/p/coachcard']])
   await ui.press({ key: 'focus-bg-full' })
@@ -238,7 +226,7 @@ test('an empty day says so', async ($, on) => {
   await $.command.run(HUDDLE)
 
   const ui = await $.ui.mount(PANE('terminal'))
-  expect((await ui.find({ type: 'Text', text: /No posts today/ }))?.text).toContain('type @ to mention a session')
+  expect((await ui.find({ type: 'Text', text: /No posts today/ }))?.text).toContain('click a name to mention it')
   await ui.unmount()
 })
 
@@ -324,17 +312,15 @@ test('the session list opens from its header and offers Stop on background sessi
   for (const surface of SURFACES) {
     const ui = await $.ui.mount(PANE(surface))
     // Open by default.
-    expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ SESSIONS')
-    expect(await ui.find({ type: 'Text', text: /● 2 working/ })).toBeDefined()
+    expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 3 · 2 busy')
     expect((await ui.find({ key: 'mention-bg-full' }))?.props.label).toBe('nightly-qa')
-    expect(await ui.find({ type: 'Text', text: 'YOU' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'you' })).toBeDefined()
     expect(await ui.find({ key: 'stop-bg1' })).toBeDefined()
     // No Stop for interactive sessions, this one included.
     for (const id of ['sid', 's1', 'undefined']) expect(await ui.find({ key: `stop-${id}` })).toBeUndefined()
 
     await ui.press({ key: 'peers' })
-    expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▸ SESSIONS')
-    expect(await ui.find({ type: 'Text', text: /○ 1 idle/ })).toBeDefined()
+    expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▸ Sessions 3 · 2 busy')
     expect(await ui.find({ key: 'mention-bg-full' })).toBeUndefined()
     await ui.press({ key: 'peers' })
     await ui.unmount()
@@ -353,7 +339,7 @@ test('Stop runs claude stop with the short id, toasts, and drops the row', async
   expect(day.stops).toEqual(['bg1'])
   expect(day.toasts.at(-1)).toBe('Stopped nightly-qa. Resume it with: claude attach bg1')
   expect(await ui.find({ key: 'stop-bg1' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /● 1 working/ })).toBeDefined()
+  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 2 · 1 busy')
   await ui.unmount()
 })
 
@@ -377,10 +363,6 @@ test('a long session list takes at most half the pane and counts the rest', asyn
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
-  // Active folds them all into one row; All lists them.
-  expect((await ui.find({ key: 'idle-fold' }))?.props.label).toBe('○ 30 idle · peer-0, peer-1, peer-2…')
-  expect(await ui.find({ key: 'mention-s0' })).toBeUndefined()
-  await ui.press({ key: 'idle-fold' })
 
   // bodyRows 20: half is 10, less the header is 9 rows: 8 sessions and "+22 more".
   expect(await ui.find({ key: 'mention-s7' })).toBeDefined()
@@ -421,7 +403,6 @@ test("each session's row shows its context fill; a session without huddle shows 
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
-  await ui.press({ key: 'filter-all' })
 
   expect((await ui.find({ type: 'Text', text: '42%' }))?.props.color).toBeUndefined()
   // Nearly full is drawn in the warning color.
@@ -463,8 +444,7 @@ test('the session list still shows when the context files cannot be read', async
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
-  expect(await ui.find({ key: 'mention-sid' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /● 2 working/ })).toBeDefined()
+  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 3 · 2 busy')
   await ui.unmount()
 })
 
@@ -499,7 +479,6 @@ test("a session without huddle has its context read off its transcript, as a % w
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('desktop'))
-  await ui.press({ key: 'filter-all' })
 
   expect(await ui.find({ type: 'Text', text: '~50%' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'MAX' })).toBeDefined()
@@ -531,8 +510,7 @@ test('a session that posted shows whom it is talking to, and they show who talks
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
 
-  expect(await ui.find({ type: 'Text', text: /· 2 talking/ })).toBeDefined()
-  await ui.press({ key: 'filter-all' })
+  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 3 · 2 busy · 2 talking')
   expect((await ui.find({ type: 'Text', text: '→ @coachcard-1e' }))?.props.color).toBe('suggestion')
   expect(await ui.find({ type: 'Text', text: '← huddle-5a' })).toBeDefined()
   await ui.unmount()
@@ -567,10 +545,7 @@ test('clicking a session puts its @handle in the post box, once', async ($, on) 
   await $.command.run(HUDDLE)
 
   for (const surface of SURFACES) {
-    // Tall enough for every row: off the terminal a session takes two.
-    const pane = PANE(surface)
-    const ui = await $.ui.mount({ ...pane, props: { ...pane.props, scroll: { offset: 0, bodyRows: 40 } } })
-    await ui.press({ key: 'filter-all' })
+    const ui = await $.ui.mount(PANE(surface))
     await ui.input({ key: 'post', text: 'hey', kind: 'change' })
     await ui.press({ key: 'mention-s1' })
     await ui.press({ key: 'mention-s9' })
@@ -605,7 +580,6 @@ test('typing is not drawn back into the post box; it grows to three lines', asyn
   expect((await box())?.rows).toBe(3)
   expect((await box())?.value).toBe('')
 
-  await ui.press({ key: 'filter-all' })
   await ui.press({ key: 'mention-s1' })
   expect((await box())?.value).toBe('a\nb\nc\nd\ne @coachcard-1e ')
   await ui.input({ key: 'post', text: '', kind: 'change' })
@@ -621,22 +595,17 @@ test('postRowsFor counts wrapped and typed lines, at most three', () => {
   expect(postRowsFor('x'.repeat(500), 40)).toBe(3)
 })
 
-test('the feed draws mentions and code apart, and each other author with its icon', async ($, on) => {
+test('the feed draws mentions apart and each author with its icon', async ($, on) => {
   const day = world(on)
-  day.lines = ['- 14:34 **huddle-5a**: try `U+2588`', '- 14:35 **you**: @coachcard-1e which tests?']
+  day.lines = ['- 14:35 **you**: @coachcard-1e which tests?']
   day.mtimeMs = 1
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
   const mention = await ui.find({ type: 'Text', text: /^@coachcard-1e$/ })
-  expect(mention?.props).toMatchObject({ bold: true, color: 'warning' })
+  expect(mention?.props).toMatchObject({ bold: true, color: 'suggestion' })
   expect(mention?.props.backgroundColor).toBeUndefined()
-  // A code span is drawn on its own background (the terminal is monospaced already).
-  expect((await ui.find({ type: 'Text', text: /^U\+2588$/ }))?.props.backgroundColor).toBe('subtle')
-  // Your posts need no name; another author's header carries its icon and the agent badge.
-  expect(await ui.find({ type: 'Text', text: /^👤 you$/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^\S+ huddle-5a$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'agent' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^👤 you$/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -672,7 +641,7 @@ test('the talking arrow goes once the post is ten minutes old, with no other cha
   expect(await ui.find({ type: 'Text', text: '→ @coachcard-1e' })).toBeDefined()
   await clock.advance(10 * 60_000 + 2000)
   expect(await ui.find({ type: 'Text', text: '→ @coachcard-1e' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /talking/ })).toBeUndefined()
+  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 3 · 2 busy')
   await ui.unmount()
 })
 
@@ -738,172 +707,6 @@ test('a long post shows its first rows and opens with more', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /END/ })).toBeUndefined()
   await ui.press({ key: 'more-0' })
   expect(await ui.find({ type: 'Text', text: /END/ })).toBeDefined()
-  expect((await ui.find({ key: 'more-0' }))?.props.label).toBe('Show less')
-  await ui.unmount()
-})
-
-test('consecutive posts of one author group under one header, timed first to last', () => {
-  const groups = groupPosts([
-    '- 14:55 **you**: sup',
-    '- 14:56 **you**: how is it going?',
-    '- 15:00 **huddle-5a**: fine',
-    'not a post',
-    '- 15:34 **you**: ok',
-  ])
-  expect(groups.map((group) => ('raw' in group ? 'raw' : `${group.name}×${group.posts.length}`))).toEqual(['you×2', 'huddle-5a×1', 'raw', 'you×1'])
-  const first = groups[0]!
-  expect('posts' in first && groupTime(first.posts)).toBe('14:55 – 14:56')
-
-  // One row a post and one a header: three rows keep the newest group whole and nothing older.
-  const cost = { header: () => 1, post: () => 1, raw: () => 1 }
-  expect(fitGroups(groups, 2, cost)).toEqual([groups[3]])
-  // A group is cut from its oldest posts.
-  const cut = fitGroups(groupPosts(['- 01:00 **you**: a', '- 01:01 **you**: b', '- 01:02 **you**: c']), 3, cost)
-  expect(cut.flatMap((group) => ('posts' in group ? group.posts.map((post) => post.body) : []))).toEqual(['b', 'c'])
-  // The newest post shows however tall it is.
-  expect(fitGroups(groups, 0, cost)).toEqual([groups[3]])
-})
-
-test('splitCode, initials and statusWord', () => {
-  expect(splitCode('mix `U+2588` and `x`')).toEqual([{ text: 'mix ' }, { text: 'U+2588', isCode: true }, { text: ' and ' }, { text: 'x', isCode: true }])
-  expect(['Huddle', 'coachcard-5b', 'sprint 25', 'huddle-40', 'long-name-here', 'a'].map(initials)).toEqual(['HU', '5B', 'S25', '40', 'LH', 'A'])
-  expect(['busy', 'idle', undefined, 'waiting'].map((status) => statusWord({ sessionId: 'x', name: 'x', status }))).toEqual([
-    'working', 'idle', 'idle', 'waiting',
-  ])
-})
-
-test('a mention being typed is found, completed and matched against the sessions', () => {
-  expect(['hi @co', 'hi @', '@', 'mail x@y', 'hi @co ', 'hi'].map(mentionQueryOf)).toEqual(['co', '', '', null, null, null])
-  expect(completeMention('hi @co', 'coachcard-1e')).toBe('hi @coachcard-1e ')
-  expect(completeMention('hi @', 'sprint 25')).toBe('hi @sprint-25 ')
-  const everyone = [
-    { sessionId: 'a', name: 'huddle-5a' },
-    { sessionId: 'b', name: 'coachcard-5b' },
-    { sessionId: 'c', name: 'Huddle' },
-    { sessionId: 'd', name: 'Huddle' },
-    { sessionId: 'e', name: 'café' },
-  ]
-  // Starts first, then holds; one per handle; a name no mention spells is left out.
-  expect(suggest(everyone, 'hu').map((peer) => peer.sessionId)).toEqual(['a', 'c'])
-  expect(suggest(everyone, '5').map((peer) => peer.sessionId)).toEqual(['a', 'b'])
-  expect(suggest(everyone, '').map((peer) => peer.sessionId)).toEqual(['a', 'b', 'c'])
-})
-
-test('typing @ lists matching sessions; picking one completes the mention', async ($, on) => {
-  const day = world(on)
-  await $.session.start(START)
-  await $.command.run(HUDDLE)
-  for (const surface of SURFACES) {
-    const ui = await $.ui.mount(PANE(surface))
-    const box = async () => (await ui.find({ key: 'post' }))?.props
-    expect(await ui.find({ key: 'suggestions' })).toBeUndefined()
-    const drawn = (await box())?.value
-
-    await ui.input({ key: 'post', text: 'hey @co', kind: 'change' })
-    expect(await ui.find({ type: 'Text', text: /Sessions matching “co”/ })).toBeDefined()
-    expect(await ui.find({ key: 'suggest-s1' })).toBeDefined()
-    expect(await ui.find({ key: 'suggest-sid' })).toBeUndefined()
-    // Typing is still not drawn back.
-    expect((await box())?.value).toBe(drawn)
-
-    await ui.press({ key: 'suggest-s1' })
-    expect((await box())?.value).toBe('hey @coachcard-1e ')
-    expect(await ui.find({ key: 'suggestions' })).toBeUndefined()
-
-    // The @ button starts a mention and lists every session.
-    await ui.press({ key: 'mention-picker' })
-    expect((await box())?.value).toBe('hey @coachcard-1e @')
-    expect(await ui.find({ type: 'Text', text: /Mention a session/ })).toBeDefined()
-    expect((await ui.findAll({ type: 'Button' })).filter((button) => button.key?.startsWith('suggest-'))).toHaveLength(3)
-    // Pressed again, it closes the list.
-    await ui.press({ key: 'mention-picker' })
-    expect(await ui.find({ key: 'suggestions' })).toBeUndefined()
-    await ui.input({ key: 'post', text: '', kind: 'change' })
-    await ui.unmount()
-  }
-  expect(day.appended).toEqual([])
-})
-
-test('off the terminal, Send posts what is typed; the terminal posts on Enter alone', async ($, on) => {
-  const day = world(on)
-  await $.session.start(START)
-  await $.command.run(HUDDLE)
-  const term = await $.ui.mount(PANE('terminal'))
-  expect(await term.find({ key: 'send' })).toBeUndefined()
-  await term.unmount()
-
-  const ui = await $.ui.mount(PANE('desktop'))
-  expect(await ui.find({ type: 'Text', text: /Enter to send/ })).toBeDefined()
-  await ui.input({ key: 'post', text: 'sent by button', kind: 'change' })
-  await ui.press({ key: 'send' })
-  expect(day.appended.at(-1)).toMatch(/\*\*you\*\*: sent by button$/)
-  expect((await ui.find({ key: 'post' }))?.props.value).toBe('')
-  await ui.unmount()
-})
-
-test('your consecutive posts share one time range; the idle sessions fold into one row', async ($, on) => {
-  const day = world(on)
-  day.lines = ['- 14:56 **you**: how is it?', '- 15:34 **you**: still there?']
-  day.mtimeMs = 1
-  await $.session.start(START)
-  await $.command.run(HUDDLE)
-  const ui = await $.ui.mount(PANE('terminal'))
-  expect(await ui.find({ type: 'Text', text: '14:56 – 15:34' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^14:56$/ })).toBeUndefined()
-
-  expect(await ui.find({ key: 'mention-s1' })).toBeUndefined()
-  expect((await ui.find({ key: 'filter-active' }))?.props.label).toBe('Active 2')
-  expect((await ui.find({ key: 'idle-fold' }))?.props.label).toBe('○ 1 idle · coachcard-1e')
-  await ui.press({ key: 'idle-fold' })
-  expect(await ui.find({ key: 'mention-s1' })).toBeDefined()
-  expect(await ui.find({ key: 'idle-fold' })).toBeUndefined()
-  await ui.press({ key: 'filter-active' })
-  expect(await ui.find({ key: 'mention-s1' })).toBeUndefined()
-  await ui.unmount()
-})
-
-test('a wide pane puts every session in a sidebar, grouped by what it is doing', async ($, on) => {
-  const day = world(on)
-  day.lines = ['- 14:32 **coachcard-1e**: QA is green']
-  day.mtimeMs = 1
-  await $.session.start(START)
-  await $.command.run(HUDDLE)
-  for (const surface of SURFACES) {
-    const pane = PANE(surface)
-    const ui = await $.ui.mount({ ...pane, props: { ...pane.props, bodyColumns: 140, scroll: { offset: 0, bodyRows: 30 } } })
-    expect(await ui.find({ key: 'sidebar' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'WORKING · 2' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'IDLE · 1' })).toBeDefined()
-    // No filter or toggle there: the idle session is listed too.
-    expect(await ui.find({ key: 'peers' })).toBeUndefined()
-    expect(await ui.find({ key: 'mention-s1' })).toBeDefined()
-    expect(await ui.find({ key: 'stop-bg1' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'All messages' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /QA is green/ })).toBeDefined()
-    expect((await ui.find({ key: 'post' }))?.type).toBe('Input')
-    await ui.unmount()
-  }
-})
-
-test('All keeps the list order: background first, then newest', async ($, on) => {
-  world(on)
-  await $.session.start(START)
-  await $.command.run(HUDDLE)
-  const ui = await $.ui.mount(PANE('terminal'))
-  await ui.press({ key: 'filter-all' })
-  const keys = (await ui.findAll({ type: 'Button' })).map((button) => button.key).filter((key) => key?.startsWith('mention-') && key !== 'mention-picker')
-  expect(keys).toEqual(['mention-bg-full', 'mention-s1', 'mention-sid'])
-  await ui.unmount()
-})
-
-test('an @ right after a code span is no mention, as delivery reads it', async ($, on) => {
-  const day = world(on)
-  day.lines = ['- 14:34 **huddle-5a**: run `x`@foo then @bar']
-  day.mtimeMs = 1
-  await $.session.start(START)
-  await $.command.run(HUDDLE)
-  const ui = await $.ui.mount(PANE('terminal'))
-  expect(await ui.find({ type: 'Text', text: /^@foo$/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^@bar$/ })).toBeDefined()
+  expect((await ui.find({ key: 'more-0' }))?.props.label).toBe('less')
   await ui.unmount()
 })

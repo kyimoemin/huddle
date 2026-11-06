@@ -54,13 +54,6 @@ declare module 'claude-code' {
       expanded: string[]
       /** Whether the session list is expanded. */
       showPeers: boolean
-      /** Which sessions the list shows: the active ones (idle ones folded into one row) or all. */
-      sessionFilter: 'active' | 'all'
-      /**
-       * The `@word` being typed at the end of the post box, without its `@`
-       * (`''` right after an `@`); `null` when none is. Drives the suggestions.
-       */
-      mentionQuery: string | null
     }
   }
 }
