@@ -5,6 +5,13 @@ import { PERSON_ICON, addMention, isMentionable, compactTokens, dayFile, handle,
 import { type $, channelDir, deliverMentions, errorText, forgetSessions, peerStatuses, post, runClaude, runner, sessions } from './channel'
 
 export const PANE = 'huddle'
+/**
+ * The commands that open the pane. `/huddle` is also the name of huddle's MCP
+ * server, which the VS Code extension's `/` menu lists as a row of its own, so
+ * Enter there can open the server's settings instead: `/huddle-panel` names
+ * only the pane.
+ */
+export const OPEN_COMMANDS = ['huddle', 'huddle-panel'] as const
 const TITLE = '#huddle'
 const POLL_MS = 2000
 const FEED_LINES = 200
@@ -286,9 +293,11 @@ export function fitLines(lines: readonly string[], rows: number, columns: number
   return kept
 }
 
-/** The panel's part of `session.start`: the /huddle command, and polling again after a reload. */
+/** The panel's part of `session.start`: the commands that open it, and polling again after a reload. */
 export async function startPanel($: $): Promise<void> {
-  await $.command.register({ name: 'huddle', description: 'Open #huddle: the channel every local session shares' })
+  for (const name of OPEN_COMMANDS) {
+    await $.command.register({ name, description: 'Open #huddle: the channel every local session shares' })
+  }
   // A reload keeps the pane up but drops timers: start polling again.
   if ((await $.ui.panes()).some((pane) => pane.id === PANE)) {
     await refresh($, true)
@@ -298,10 +307,12 @@ export async function startPanel($: $): Promise<void> {
 }
 
 export function registerPanel(on: On): void {
-  on('command.run', { command: 'huddle' }, async ($) => {
-    const isPlaced = await openPane($)
-    return { text: isPlaced ? '#huddle opened.' : '#huddle opens when the window is wide enough.' }
-  })
+  for (const command of OPEN_COMMANDS) {
+    on('command.run', { command }, async ($) => {
+      const isPlaced = await openPane($)
+      return { text: isPlaced ? '#huddle opened.' : '#huddle opens when the window is wide enough.' }
+    })
+  }
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Input, Button } = $.ui.resolve(e)

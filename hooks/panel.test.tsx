@@ -44,6 +44,8 @@ function world(on: On, hasMockClock = false) {
     toasts: [] as string[],
     stops: [] as string[],
     stopFails: false,
+    /** The commands the plugin registered, in order. */
+    commands: [] as string[],
     context: {} as Record<string, { mtimeMs: number; text: string }>,
     lists: 0,
     removed: [] as string[],
@@ -62,7 +64,10 @@ function world(on: On, hasMockClock = false) {
   if (!hasMockClock) on('clock.now', () => ({ value: Date.now() }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__huddle__${e.name}` } }))
-  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('command.register', (_, e) => {
+    state.commands.push(e.name)
+    return { value: { command: e.name } }
+  })
   on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
   on('session.id', () => ({ value: 'sid' }))
   on('session.cwd', () => ({ value: '/Users/me/Projects/huddle' }))
@@ -171,6 +176,16 @@ test("/huddle opens the pane showing today's posts, on every surface", async ($,
     expect((await ui.find({ key: 'post' }))?.type).toBe('Input')
     await ui.unmount()
   }
+})
+
+test('/huddle-panel opens the pane too, and both commands are registered', async ($, on) => {
+  const day = world(on)
+  await $.session.start(START)
+  expect(day.commands).toEqual(['huddle', 'huddle-panel'])
+
+  const ran = await $.command.run({ ...HUDDLE, command: 'huddle-panel' })
+  expect(String(ran.text)).toContain('#huddle opened')
+  expect(day.isOpen).toBe(true)
 })
 
 test('an empty day says so', async ($, on) => {
