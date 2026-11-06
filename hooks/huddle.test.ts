@@ -9,6 +9,7 @@ import {
   huddleDir,
   lastLines,
   mentionMessage,
+  parseListAgents,
   parseSessions,
   resolveMentions,
   parseMentions,
@@ -155,4 +156,34 @@ test('parseSessions keeps rows with a sessionId and a name', () => {
   const out = JSON.stringify([{ sessionId: 'a', name: 'x', pid: 1 }, { sessionId: 'b' }, null, { name: 'y' }])
   expect(parseSessions(out)).toEqual([{ sessionId: 'a', name: 'x', pid: 1 } as never])
   expect(parseSessions('{}')).toEqual([])
+})
+
+test('ListAgents rows stand in for claude agents: self from the header, peers by name [ref]', () => {
+  const rows = parseListAgents(
+    {
+      listing: 'This session is huddle-5a [2195f3] — the name other sessions use to message it.\n\nPeer sessions (2): ...',
+      sections: [
+        {
+          kind: 'peers',
+          rows: [
+            { name: 'coachcard-1e', ref: '3d3fa0', type: 'interactive', status: 'idle' },
+            { name: 'nightly-qa', ref: '[06853d]', type: 'background', status: 'busy' },
+            { ref: 'ffffff' },
+          ],
+        },
+      ],
+    },
+    'sid',
+  )
+  expect(rows).toEqual([
+    { sessionId: 'sid', name: 'huddle-5a' },
+    { sessionId: 'ref:3d3fa0', name: 'coachcard-1e', kind: 'interactive', status: 'idle', address: 'coachcard-1e [3d3fa0]' },
+    { sessionId: 'ref:06853d', name: 'nightly-qa', kind: 'background', status: 'busy', address: 'nightly-qa [06853d]' },
+  ])
+  // No row carries the short id Stop needs.
+  expect(rows.some((row) => row.id !== undefined)).toBe(false)
+  expect(resolveMentions(['coachcard-1e'], rows, 'sid').targets).toEqual([
+    { name: 'coachcard-1e', sessionId: 'ref:3d3fa0', address: 'coachcard-1e [3d3fa0]' },
+  ])
+  expect(parseListAgents({}, 'sid')).toEqual([])
 })

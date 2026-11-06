@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { On, Timer } from 'claude-code'
 import type { Feed, Peer } from '../types'
 import { dayFile, localDay, tailFile } from './huddle'
-import { type $, channelDir, deliverMentions, errorText, forgetSessions, post, runner, sessions } from './channel'
+import { type $, channelDir, deliverMentions, errorText, forgetSessions, post, runClaude, runner, sessions } from './channel'
 
 export const PANE = 'huddle'
 const TITLE = '#huddle'
@@ -59,7 +59,13 @@ export async function refreshPeers($: $): Promise<void> {
  */
 export async function stopPeer($: $, peer: Peer): Promise<void> {
   if (peer.kind !== 'background' || !peer.id) return
-  const { exitCode, stdout, stderr } = await $.process.run(['claude', 'stop', peer.id], { timeoutMs: 15_000 })
+  let ran: { exitCode: number; stdout: string; stderr: string }
+  try {
+    ran = await runClaude($, ['stop', peer.id], 15_000)
+  } catch (error) {
+    ran = { exitCode: -1, stdout: '', stderr: errorText(error) }
+  }
+  const { exitCode, stdout, stderr } = ran
   if (exitCode === 0) {
     await update($, notice, () => '')
     $.ui.toast(`Stopped ${peer.name}. Resume it with: claude attach ${peer.id}`)

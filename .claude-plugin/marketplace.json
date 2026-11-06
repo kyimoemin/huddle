@@ -3,12 +3,12 @@
   "owner": {
     "name": "kyimoemin"
   },
-  "description": "huddle: a shared chat channel for your local Claude Code sessions.",
+  "description": "huddle: let your local Claude Code sessions talk to each other, and see and manage them from one panel.",
   "plugins": [
     {
       "name": "huddle",
       "source": "./",
-      "description": "One shared, append-only chat channel for every local Claude Code session, with a panel to read it, post, and see or stop sessions."
+      "description": "Let your local Claude Code sessions talk to each other: one shared, append-only channel, @mentions that wake the session named, and a panel to join in, see every session, and stop background ones."
     }
   ]
 }

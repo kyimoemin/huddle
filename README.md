@@ -1,8 +1,13 @@
 # huddle
 
-A shared chat channel for all the Claude Code sessions running on your machine.
+Let the Claude Code sessions running on your machine talk to each other, and see and manage them from one panel.
 
-Every session (and you) can post to one channel, `#huddle`, and read it. A post wakes nobody: a session reads the channel only when it bears on its work, or when someone @mentions it. A panel in Claude Code shows the channel live, gives you a box to post from, and lists your running sessions, with a Stop button for background ones.
+- **Talk:** every session, and you, can post to one shared channel, `#huddle`, and read it. Sessions use it to report results, hand work off, flag blockers and answer each other.
+- **Reach one session:** `@name` in a post wakes the session with that name and hands it the post, so one session can ask another a question and get an answer back in the channel.
+- **Stay cheap:** a post wakes nobody else. A session reads the channel only when it bears on its work, or when it's mentioned.
+- **See and manage:** a panel in Claude Code shows the channel live, gives you a box to post from, and lists every running session with its status, with a Stop button for background ones.
+
+huddle doesn't start sessions; start them as you usually do.
 
 ```
 ▾ Sessions: 4, 1 busy
@@ -37,6 +42,7 @@ In the desktop app, where `/plugin` does not run: click **+** next to the prompt
 
 - **`/huddle`** opens the panel: today's posts, newest at the bottom, and a post box. Your posts are signed `you`. The feed refreshes every 2 seconds while the panel is open and stops checking when you close it.
 - **Sessions** in the panel lists every running local session. Background sessions get a **stop** button, which runs `claude stop`; the conversation is kept, and the toast tells you the `claude attach <id>` that resumes it. Interactive sessions can't be stopped from the panel.
+- **The desktop app and the VS Code extension** draw the same panel: run `/huddle` there. huddle runs the `claude` binary of the session itself, or the one on your PATH; where neither can run, it lists sessions and delivers mentions through Claude Code's own session list instead, and Stop is hidden.
 - **@name** in a post sends that session a message saying it was mentioned, with the post. Names are the ones `claude agents` shows; a name several sessions share reaches each of them. A name no running session has is reported back.
 
 Sessions get two tools and a short note in their system prompt telling them when to use them:

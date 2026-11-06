@@ -117,9 +117,14 @@ export type SessionRow = {
   kind?: string
   /** `idle` or `busy`. */
   status?: string
-  /** The short id `claude stop` takes; background sessions only. */
+  /** The short id `claude stop` takes; background sessions only, and only from the CLI. */
   id?: string
   startedAt?: number
+  /**
+   * How `$.session.send` addresses it when `sessionId` is not a real one: the
+   * `name [ref]` spelling ListAgents shows, for rows read from that tool.
+   */
+  address?: string
 }
 
 /** Names that mention no session: `@you` is the person. */
@@ -127,7 +132,7 @@ const NOT_SESSIONS = new Set(['you'])
 
 export type Mentions = {
   /** Every session a mention reaches; a name several sessions share reaches each. */
-  targets: { name: string; sessionId: string }[]
+  targets: { name: string; sessionId: string; address?: string }[]
   /** Mentioned names no running session carries. */
   unknown: string[]
 }
@@ -144,7 +149,10 @@ export function resolveMentions(names: readonly string[], rows: readonly Session
     if (NOT_SESSIONS.has(lower)) continue
     const matches = rows.filter((row) => row.name.toLowerCase() === lower)
     if (matches.length === 0) unknown.push(name)
-    for (const row of matches) if (row.sessionId !== selfId) targets.push({ name: row.name, sessionId: row.sessionId })
+    for (const row of matches) {
+      if (row.sessionId === selfId) continue
+      targets.push(row.address ? { name: row.name, sessionId: row.sessionId, address: row.address } : { name: row.name, sessionId: row.sessionId })
+    }
   }
   return { targets, unknown }
 }
@@ -162,4 +170,36 @@ export function parseSessions(stdout: string): SessionRow[] {
     (row): row is SessionRow =>
       typeof row === 'object' && row !== null && typeof row.sessionId === 'string' && typeof row.name === 'string',
   )
+}
+
+/** What the ListAgents tool answers, the parts huddle reads. */
+export type ListAgentsResult = {
+  listing?: string
+  sections?: { kind?: string; rows?: { name?: string; ref?: string; id?: string; type?: string; status?: string }[] }[]
+}
+
+/**
+ * Session rows from the ListAgents tool, for when the `claude` CLI cannot run.
+ * Its header names this session ("This session is huddle-5a [2195f3]"); its
+ * rows are the peers. Peers get a stand-in `sessionId` and are sent to by
+ * their `name [ref]` address. No row gets the short id Stop needs.
+ */
+export function parseListAgents(result: ListAgentsResult, selfId: string): SessionRow[] {
+  const rows: SessionRow[] = []
+  const self = /This session is (.+?)(?: \[([0-9a-f]+)\])?(?: [—-]|\s*\(|$)/m.exec(result.listing ?? '')
+  if (self?.[1]) rows.push({ sessionId: selfId, name: self[1].trim() })
+  for (const section of result.sections ?? []) {
+    for (const row of section.rows ?? []) {
+      if (!row.name) continue
+      const ref = row.ref?.replace(/^\[|\]$/g, '')
+      rows.push({
+        sessionId: `ref:${ref ?? row.id ?? row.name}`,
+        name: row.name,
+        ...(row.type ? { kind: row.type } : {}),
+        ...(row.status ? { status: row.status } : {}),
+        address: ref ? `${row.name} [${ref}]` : row.name,
+      })
+    }
+  }
+  return rows
 }

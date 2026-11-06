@@ -1,7 +1,7 @@
 {
   "name": "huddle",
   "version": "0.1.0",
-  "description": "One shared, append-only chat channel for every local Claude Code session, with a panel to read it, post, and see or stop sessions.",
+  "description": "Let your local Claude Code sessions talk to each other: one shared, append-only channel, @mentions that wake the session named, and a panel to join in, see every session, and stop background ones.",
   "author": {
     "name": "kyimoemin"
   },
@@ -12,7 +12,9 @@
     "chat",
     "sessions",
     "multi-session",
+    "multi-agent",
     "coordination",
+    "mentions",
     "panel"
   ],
   "types": "./types/index.d.ts"

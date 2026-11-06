@@ -14,6 +14,8 @@ function engine(
   on: On,
   answer: (argv: readonly string[]) => Answer = () => ({ exitCode: 0 }),
   huddleDirEnv?: string,
+  /** `CLAUDE_CODE_EXECPATH`; a path holding `broken` does not start, nor does `claude` with `noCli`. */
+  cli: { execPath?: string; noCli?: boolean } = {},
 ) {
   const runs: (readonly string[])[] = []
   const registered: string[] = []
@@ -22,14 +24,21 @@ function engine(
     registered.push(e.name)
     return { value: { tool: `mcp__huddle__${e.name}` } }
   })
-  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : e.name === 'HUDDLE_DIR' ? huddleDirEnv : undefined }))
+  on('env.get', (_, e) => ({
+    value:
+      e.name === 'HOME' ? '/h' : e.name === 'HUDDLE_DIR' ? huddleDirEnv : e.name === 'CLAUDE_CODE_EXECPATH' ? cli.execPath : undefined,
+  }))
   on('session.id', () => ({ value: 'sid' }))
   on('session.cwd', () => ({ value: '/Users/me/Projects/huddle' }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('ui.panes', () => ({ value: [] }))
   on('process.run', (_, e) => {
     runs.push(e.argv)
-    if (e.argv[0] === 'claude') {
+    const isCli = e.argv[0] === 'claude' || (cli.execPath !== undefined && e.argv[0] === cli.execPath)
+    if (isCli && (e.argv[0]!.includes('broken') || (e.argv[0] === 'claude' && cli.noCli))) {
+      return { deny: `spawn ${e.argv[0]} ENOENT` }
+    }
+    if (isCli) {
       const rows = [
         { sessionId: 'other', name: 'coachcard-1e' },
         { sessionId: 'be-1', name: 'coachcard-be' },
@@ -312,4 +321,59 @@ test('a post with no mentions sends nothing', async ($, on) => {
 
   expect(sent).toEqual([])
   expect(String(done.result)).not.toContain('Mentions')
+})
+
+test("the CLI runs as the session's own binary when CLAUDE_CODE_EXECPATH is set", async ($, on) => {
+  const bundled = '/Applications/Claude.app/Contents/Resources/claude'
+  const { runs } = engine(on, undefined, undefined, { execPath: bundled })
+  mailbox(on)
+  await $.session.start(START)
+
+  const done = await $.tool.call({ tool: POST_TOOL, text: '@coachcard-1e hi' })
+
+  expect(String(done.result)).toContain('**huddle-5a**')
+  expect(String(done.result)).toContain('notified @coachcard-1e')
+  expect(runs.filter((argv) => argv[1] === 'agents').map((argv) => argv[0])).toEqual([bundled])
+})
+
+test('a bundled binary that will not start falls back to claude on the PATH', async ($, on) => {
+  const { runs } = engine(on, undefined, undefined, { execPath: '/broken/claude' })
+  await $.session.start(START)
+
+  const done = await $.tool.call({ tool: POST_TOOL, text: 'hi' })
+
+  expect(String(done.result)).toContain('**huddle-5a**')
+  expect(runs.filter((argv) => argv[1] === 'agents').map((argv) => argv[0])).toEqual(['/broken/claude', 'claude'])
+})
+
+test('with no claude CLI at all, posts still land, signed with the folder, and mentions say why', async ($, on) => {
+  const { runs } = engine(on, undefined, undefined, { noCli: true })
+  const { toasts } = mailbox(on)
+  await $.session.start(START)
+
+  const done = await $.tool.call({ tool: POST_TOOL, text: '@coachcard-1e hi' })
+
+  expect(done.deny).toBeUndefined()
+  expect(runs.some((argv) => argv[0] === '/bin/sh')).toBe(true)
+  expect(String(done.result)).toContain('**huddle**: @coachcard-1e hi')
+  expect(String(done.result)).toContain('the claude command could not be run')
+  expect(toasts[0]).toContain('mentions not delivered')
+})
+
+test('with no claude CLI, ListAgents names this session and mentions go to name [ref]', async ($, on) => {
+  engine(on, undefined, undefined, { noCli: true })
+  const { sent } = mailbox(on)
+  on('tool.call', { tool: 'ListAgents' }, () => ({
+    result: {
+      listing: 'This session is huddle-5a [2195f3] — the name other sessions use to message it.',
+      sections: [{ kind: 'peers', total: 1, rows: [{ name: 'coachcard-1e', ref: '3d3fa0', type: 'interactive', status: 'idle' }] }],
+    },
+  }))
+  await $.session.start(START)
+
+  const done = await $.tool.call({ tool: POST_TOOL, text: '@coachcard-1e hi' })
+
+  expect(String(done.result)).toContain('**huddle-5a**: @coachcard-1e hi')
+  expect(String(done.result)).toContain('notified @coachcard-1e')
+  expect(sent.map((m) => m.to)).toEqual(['coachcard-1e [3d3fa0]'])
 })

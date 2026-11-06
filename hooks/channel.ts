@@ -1,4 +1,4 @@
-import type { EngineInterface } from 'claude-code'
+import type { EngineInterface, ProcessRunResult } from 'claude-code'
 import {
   appendLine,
   dayFile,
@@ -7,6 +7,8 @@ import {
   localDay,
   mentionMessage,
   parseMentions,
+  type ListAgentsResult,
+  parseListAgents,
   parseSessions,
   previousDayFile,
   resolveMentions,
@@ -26,20 +28,60 @@ export function runner($: $): Run {
   return (argv) => $.process.run(argv)
 }
 
+/**
+ * Runs the `claude` CLI. First the binary running this session
+ * (`$CLAUDE_CODE_EXECPATH`), which the desktop app and the VS Code extension
+ * bundle off the PATH; then `claude` on the PATH, where that is unset or
+ * does not start. Rejects only when neither starts.
+ */
+export async function runClaude($: $, args: readonly string[], timeoutMs: number): Promise<ProcessRunResult> {
+  const own = await $.env.get('CLAUDE_CODE_EXECPATH')
+  if (own) {
+    try {
+      return await $.process.run([own, ...args], { timeoutMs })
+    } catch {
+      // Fall back to the PATH.
+    }
+  }
+  try {
+    return await $.process.run(['claude', ...args], { timeoutMs })
+  } catch (error) {
+    throw new Error(`the claude command could not be run (${errorText(error)})`)
+  }
+}
+
 let cachedSessions: { rows: SessionRow[]; at: number } | undefined
 
 /**
- * The running local sessions, from `claude agents --json`. Cached briefly so
- * a post costs at most one process; names change and repeat, so not for long.
+ * The running local sessions: `claude agents --json`, or where that cannot
+ * run, the ListAgents tool (no Stop ids then). Cached briefly so a post costs
+ * at most one lookup; names change and repeat, so not for long.
  */
 export async function sessions($: $): Promise<SessionRow[]> {
   const now = Date.now()
   if (cachedSessions && now - cachedSessions.at < SESSIONS_TTL_MS) return cachedSessions.rows
-  const { exitCode, stdout, stderr } = await $.process.run(['claude', 'agents', '--json'], { timeoutMs: 10_000 })
-  if (exitCode !== 0) throw new Error(`claude agents failed: ${stderr.trim()}`)
-  const rows = parseSessions(stdout)
+  let rows: SessionRow[]
+  try {
+    const { exitCode, stdout, stderr } = await runClaude($, ['agents', '--json'], 10_000)
+    if (exitCode !== 0) throw new Error(`claude agents failed: ${stderr.trim()}`)
+    rows = parseSessions(stdout)
+  } catch (cliError) {
+    try {
+      rows = await listAgents($)
+    } catch (toolError) {
+      throw new Error(`${errorText(cliError)}; ListAgents: ${errorText(toolError)}`)
+    }
+  }
   cachedSessions = { rows, at: now }
   return rows
+}
+
+/** The session list through the ListAgents tool, which needs no CLI. */
+async function listAgents($: $): Promise<SessionRow[]> {
+  const called = await $.tool.call({ tool: 'ListAgents' })
+  if (called.deny !== undefined) throw new Error(called.deny)
+  if (called.isError) throw new Error(called.text ?? 'ListAgents failed')
+  return parseListAgents(called.result as ListAgentsResult, await $.session.id())
 }
 
 /** Drops the cached session list, so the next read runs `claude agents` again. */
@@ -79,7 +121,8 @@ export async function deliverMentions($: $, author: string, text: string, line: 
   const sent = await Promise.all(
     targets.map(async (target) => {
       try {
-        const { isDelivered, reason } = await $.session.send({ to: { sessionId: target.sessionId }, text: message })
+        const to = target.address ?? { sessionId: target.sessionId }
+        const { isDelivered, reason } = await $.session.send({ to, text: message })
         return isDelivered ? { ...target, ok: true as const } : { ...target, ok: false as const, reason }
       } catch (error) {
         return { ...target, ok: false as const, reason: errorText(error) }
