@@ -20,6 +20,11 @@ const FEED_LINES = 200
 const BELOW_FEED = 3
 /** The most lines the post box grows to before its text scrolls within. */
 const MAX_POST_ROWS = 3
+/**
+ * The fewest lines the post box takes off the terminal: a one-row `Input` is a
+ * single-line field there, which submits on Shift+Enter and never wraps.
+ */
+const MIN_REMOTE_POST_ROWS = 2
 /** Columns of the pane the post box's own chrome takes (its prompt mark and `post` label). */
 const POST_CHROME = 8
 /** The session list's header row. */
@@ -402,7 +407,8 @@ export function registerPanel(on: On): void {
     const { Box, Text, Input, Button } = $.ui.resolve(e)
     const { lines } = await read($, feed)
     const typed = await read($, draft)
-    const rows = await read($, postRows)
+    // Off the terminal the box is always a text area, so Shift+Enter types a newline.
+    const rows = e.surface === 'terminal' ? await read($, postRows) : Math.max(MIN_REMOTE_POST_ROWS, await read($, postRows))
     const problem = await read($, notice)
     const everyone = await read($, peers)
     const isListOpen = await read($, showPeers)
@@ -433,7 +439,10 @@ export function registerPanel(on: On): void {
       .join(' · ')
 
     return (
-      <Box flexDirection="column">
+      // The feed shrinks and clips its oldest posts, so the post box stays in view
+      // where the rows counted above miss what a surface draws (desktop's
+      // proportional text and margins).
+      <Box flexDirection="column" height={e.surface === 'terminal' ? undefined : '100%'}>
         <Button
           key="peers"
           plain
@@ -537,7 +546,7 @@ export function registerPanel(on: On): void {
         <Text dimColor size="caption">
           Today
         </Text>
-        <Box flexDirection="column" flexGrow={1}>
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden" justifyContent="flex-end">
           {shown.length === 0 && <Text dimColor>No posts today. Write one below; click a name to mention it.</Text>}
           {shown.map((line, i) => {
             const row = parseRow(line)
@@ -562,7 +571,7 @@ export function registerPanel(on: On): void {
                   </Text>{' '}
                   {splitMentions(body).map((part, j) =>
                     part.isMention ? (
-                      <Text key={`m-${j}`} color="inverseText" backgroundColor="suggestion">
+                      <Text key={`m-${j}`} bold color="suggestion">
                         {part.text}
                       </Text>
                     ) : (
@@ -588,6 +597,7 @@ export function registerPanel(on: On): void {
           })}
         </Box>
         {problem !== '' && <Text dimColor>{problem}</Text>}
+        <Box key="post-row" width="100%" flexShrink={0}>
         <Input
           key="post"
           placeholder="Message #huddle · @name to mention"
@@ -597,6 +607,7 @@ export function registerPanel(on: On): void {
           onInput={(value) => void noteTyping($, value)}
           onSubmit={(value) => void submit($, value)}
         />
+        </Box>
       </Box>
     )
   })

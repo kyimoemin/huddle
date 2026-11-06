@@ -602,9 +602,22 @@ test('the feed draws mentions apart and each author with its icon', async ($, on
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
-  expect((await ui.find({ type: 'Text', text: /^@coachcard-1e$/ }))?.props.backgroundColor).toBe('suggestion')
+  const mention = await ui.find({ type: 'Text', text: /^@coachcard-1e$/ })
+  expect(mention?.props).toMatchObject({ bold: true, color: 'suggestion' })
+  expect(mention?.props.backgroundColor).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^👤 you$/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('the post box is a one-line field on the terminal and a text area elsewhere', async ($, on) => {
+  world(on)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  for (const [surface, rows] of [['terminal', 1], ['desktop', 2]] as const) {
+    const ui = await $.ui.mount(PANE(surface))
+    expect((await ui.find({ key: 'post' }))?.props.rows).toBe(rows)
+    await ui.unmount()
+  }
 })
 
 test('splitMentions and barFill', () => {
