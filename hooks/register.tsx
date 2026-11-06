@@ -1,7 +1,7 @@
 import type { Register } from 'claude-code'
 import { huddleDir } from './huddle'
 import { absolute, bashRewriteReason, collapse, isInside, type Where } from './guard'
-import { type $, deliverMentions, errorText, ownName, post, publishContext, read, unpublishContext } from './channel'
+import { type $, channelDir, deliverMentions, errorText, ownName, post, publishContext, read, unpublishContext } from './channel'
 import { registerPanel, startPanel } from './panel'
 
 // Literal so `claude plugin validate` can read the matchers that use them.
@@ -45,7 +45,8 @@ async function guardWhere($: $): Promise<Where> {
   const cwd = await $.session.cwd()
   if (guardDirs) return { ...guardDirs, cwd }
   const home = (await $.env.get('HOME')) ?? ''
-  const lexical = [huddleDir(home), (await $.env.get('HUDDLE_DIR')) ?? '']
+  // The channel the tools use, HUDDLE_DIR resolved the same way.
+  const lexical = [huddleDir(home), (await $.env.get('HUDDLE_DIR')) ? await channelDir($) : '']
     .filter((dir) => dir !== '')
     .map((dir) => absolute(dir, cwd, home))
   const real = await Promise.all(lexical.map((dir) => realPath($, dir)))
@@ -159,11 +160,8 @@ export const register: Register = (on) => {
     try {
       reason = bashRewriteReason(e.command, where)
     } catch {
-      // A hook that throws is skipped, which would let the command run unchecked:
-      // refuse instead when it names anything near the channel.
-      if (/huddle|\.claude/.test(e.command) || where.dirs.some((dir) => e.command.includes(dir))) {
-        reason = 'could not be checked'
-      }
+      // A hook that throws is skipped, which would let the command run unchecked.
+      reason = 'could not be checked'
     }
     return reason === undefined ? next(e) : { deny: refusal(reason) }
   })

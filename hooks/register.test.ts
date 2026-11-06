@@ -18,7 +18,7 @@ function engine(
    * `CLAUDE_CODE_EXECPATH`: a path holding `broken` does not start, one holding
    * `/old/` starts and fails; `claude` itself does not start with `noCli`.
    */
-  cli: { execPath?: string; noCli?: boolean } = {},
+  cli: { execPath?: string; noCli?: boolean; cwd?: () => string } = {},
 ) {
   const runs: (readonly string[])[] = []
   const registered: string[] = []
@@ -32,7 +32,7 @@ function engine(
       e.name === 'HOME' ? '/h' : e.name === 'HUDDLE_DIR' ? huddleDirEnv : e.name === 'CLAUDE_CODE_EXECPATH' ? cli.execPath : undefined,
   }))
   on('session.id', () => ({ value: 'sid' }))
-  on('session.cwd', () => ({ value: '/Users/me/Projects/huddle' }))
+  on('session.cwd', () => ({ value: cli.cwd?.() ?? '/Users/me/Projects/huddle' }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('ui.panes', () => ({ value: [] }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
@@ -457,4 +457,20 @@ test('with HUDDLE_DIR set, the context files sit beside it', async ($, on) => {
   await $.session.start({ cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true })
   await $.session.measure({ context: { window: 200_000, percent: 7 }, rateLimits: [], changed: ['context'] })
   expect(paths).toEqual(['/tmp/scratch/huddle-context/sid.json'])
+})
+
+test('a relative HUDDLE_DIR stays on the first folder as the cwd moves, and the guard with it', async ($, on) => {
+  let cwd = '/p'
+  const { runs } = engine(on, undefined, 'scratch/chan', { cwd: () => cwd })
+  on('fs.stat', (_, e) => ({ deny: `ENOENT: ${e.path}` }))
+  await $.session.start({ cwd, surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: POST_TOOL, text: 'one' })
+  cwd = '/q'
+  await $.tool.call({ tool: POST_TOOL, text: 'two' })
+
+  const dirs = runs.filter((argv) => argv[0] === '/bin/sh').map((argv) => argv[6])
+  expect(dirs).toEqual(['/p/scratch/chan', '/p/scratch/chan'])
+  // From /q, the guard still guards /p/scratch/chan, and not /q's.
+  const write = await $.tool.call({ tool: 'Write', file_path: '/p/scratch/chan/x.md', content: 'forged' })
+  expect(write.deny).toContain('append-only')
 })

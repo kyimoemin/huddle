@@ -166,11 +166,19 @@ export async function deliverMentions($: $, author: string, text: string, line: 
 export async function channelDir($: $): Promise<string> {
   const override = await $.env.get('HUDDLE_DIR')
   const home = await $.env.get('HOME')
-  // Absolute, so sessions started in different folders share one channel.
-  if (override) return absolute(override, await $.session.cwd(), home ?? '')
+  if (override) {
+    // A relative one is taken from where the session was when first asked, and
+    // kept, so the channel and the guard stay on one folder as the cwd moves.
+    if (resolvedOverride?.raw !== override) {
+      resolvedOverride = { raw: override, dir: absolute(override, await $.session.cwd(), home ?? '') }
+    }
+    return resolvedOverride.dir
+  }
   if (!home) throw new Error('huddle: HOME is not set')
   return huddleDir(home)
 }
+
+let resolvedOverride: { raw: string; dir: string } | undefined
 
 /** Posts one entry to today's file; returns the line written. */
 export async function post($: $, name: string, text: string, at = new Date()): Promise<string> {
@@ -226,6 +234,10 @@ export async function unpublishContext($: $, id: string): Promise<void> {
 }
 
 const fills = new Map<string, { mtimeMs: number; percent: number | undefined }>()
+/** How often, and past what age, the files of sessions no longer running are removed. */
+const SWEEP_MS = 60 * 60_000
+const STALE_MS = 24 * 60 * 60_000
+let lastSweep = 0
 
 /**
  * Each listed session's context fill, by session id, from the files the
@@ -242,6 +254,19 @@ export async function contextFills($: $, sessionIds: readonly string[]): Promise
     return out
   }
   const mtimes = new Map(entries.map((entry) => [entry.name, entry.mtimeMs]))
+  const listed = new Set(sessionIds.map((id) => `${id}.json`))
+  // Forget what is no longer listed, and once in a while remove the files of
+  // sessions that ended without removing their own (a crash, a kill).
+  for (const name of fills.keys()) if (!listed.has(name)) fills.delete(name)
+  if (sessionIds.length > 0 && !sessionIds.some((id) => id.startsWith('ref:')) && Date.now() - lastSweep > SWEEP_MS) {
+    lastSweep = Date.now()
+    const stale = entries.filter(
+      (entry) => entry.name.endsWith('.json') && !listed.has(entry.name) && Date.now() - entry.mtimeMs > STALE_MS,
+    )
+    if (stale.length > 0) {
+      void $.process.run(['/bin/rm', '-f', ...stale.map((entry) => `${dir}/${entry.name}`)], { timeoutMs: 5000 }).catch(() => {})
+    }
+  }
   for (const id of sessionIds) {
     const name = `${id}.json`
     const mtimeMs = mtimes.get(name)

@@ -53,7 +53,8 @@ describe('Bash commands that rewrite the channel are refused', () => {
     [`rm -rf ~/.claude`, WHERE, /rm/],
     [`mv ~/.claude ~/old-claude`, WHERE, /mv/],
     [`rm -rf .`, { ...WHERE, cwd: '/Users/me/.claude' }, /rm/],
-    [`rsync -a --delete empty/ ~/.claude/`, WHERE, /rsync --delete/],
+    [`rsync -a --delete empty/ ~/.claude/`, WHERE, /rsync/],
+    [`rsync -a --delete empty ~/.claude/huddle-x/../`, WHERE, /rsync/],
     // Globs that hide the huddle segment.
     [`chflags nouappnd ~/.claude/hud*`, WHERE, /chflags/],
     [`rm ~/.claude/h?ddle/*.md`, WHERE, /rm/],
@@ -86,6 +87,21 @@ describe('Bash commands that rewrite the channel are refused', () => {
     [`cp -t ~/.claude/huddle /tmp/fake.md`, WHERE, /cp onto/],
     [`cp /tmp/fake.md --target-directory=${'~/.claude/huddle'}`, WHERE, /cp onto/],
     [`echo x >&${DAY}`, WHERE, /redirect/],
+    // Found reviewing PR #2.
+    [`rm -rf ~/.claude/{${Array.from({ length: 70 }, (_, i) => `a${i}`).join(',')},huddle}`, WHERE, /rm/],
+    [`rm -rf ~/.claude/hu{c..e}dle`, WHERE, /rm/],
+    [`rm -rf ~/.claude/"hud"'dle'`, WHERE, /rm/],
+    [`touch x; rm -rf ~/.claude/'hud'dle/a.md`, WHERE, /rm/],
+    [`cd ~/.claude && pushd /tmp && popd && rm -rf huddle`, WHERE, /rm/],
+    [`cd ~/.claude && pushd /tmp && pushd && rm -rf huddle`, WHERE, /rm/],
+    [`cd ~/.claude && (cd /tmp); rm -rf huddle`, WHERE, /rm/],
+    [`cd ~/.claude && cd /tmp && cd - && rm -rf huddle`, WHERE, /rm/],
+    [`rsync -a /tmp/evil/ ~/.claude/`, WHERE, /rsync onto/],
+    [`ditto /tmp/evil ~/.claude`, WHERE, /ditto onto/],
+    [`cp -RT /tmp/evil ~/.claude`, WHERE, /cp onto/],
+    [`env -S 'rm -rf ~/.claude/huddle'`, WHERE, /rm/],
+    [`env --split-string='chflags nouappnd ${DAY}'`, WHERE, /chflags/],
+    [`${'eval '.repeat(12)}ls`, WHERE, /too deeply/],
   ]
   for (const [command, where, reason] of refused) {
     test(command, () => {
@@ -124,6 +140,11 @@ describe('Bash commands that only read the channel, or leave it alone, are let t
     [`ls ~/.claude/{skills,agents}`, WHERE],
     [`cmd 2>&1 >&2 | tee /tmp/log`, WHERE],
     [`if [ -f ${DAY} ]; then cat ${DAY}; fi`, WHERE],
+    [`rm -f build/file{1..200}.o`, WHERE],
+    [`rsync -a dist/ ~/Projects/app/public/`, WHERE],
+    [`cd /tmp && pushd ~/Projects && popd && rm -rf scratch`, WHERE],
+    [`env -S 'echo hi'`, WHERE],
+    [`eval eval ls`, WHERE],
   ]
   for (const [command, where] of allowed) {
     test(command, () => {
@@ -147,6 +168,9 @@ test('brace expansion lists each word, leaving ${…} alone', () => {
   expect(expandBraces('a{b,c{d,e}}')).toEqual(['ab', 'acd', 'ace'])
   expect(expandBraces('${HOME}/x')).toEqual(['${HOME}/x'])
   expect(expandBraces('{solo}')).toEqual(['{solo}'])
+  expect(expandBraces('f{1..3}')).toEqual(['f1', 'f2', 'f3'])
+  expect(expandBraces('hu{c..e}dle')).toEqual(['hucdle', 'huddle', 'huedle'])
+  expect(expandBraces('{a,b}{1..40}')).toBeUndefined()
 })
 
 test('relation reads globs segment by segment, inside or above the channel', () => {

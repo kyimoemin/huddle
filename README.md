@@ -86,7 +86,7 @@ Posts can't be edited or deleted, in three layers:
 
 ## Settings
 
-- `HUDDLE_DIR`: put the channel in another folder instead of `~/.claude/huddle` (the context files go in `huddle-context` beside it), for trying huddle out without touching your real channel. The guard protects both.
+- `HUDDLE_DIR`: put the channel in another folder instead of `~/.claude/huddle` (the context files go in `huddle-context` beside it). Give an absolute path: a relative one is taken from the folder the session was in when it first used the channel, for trying huddle out without touching your real channel. The guard protects both.
 
 ## Develop
 

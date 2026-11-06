@@ -46,6 +46,8 @@ function world(on: On) {
     stopFails: false,
     context: {} as Record<string, { mtimeMs: number; text: string }>,
     lists: 0,
+    removed: [] as string[],
+    listFails: false,
     reads: [] as string[],
     peers: [
       { sessionId: 'sid', name: 'huddle-5a', kind: 'interactive', status: 'busy', startedAt: 1000 },
@@ -79,7 +81,7 @@ function world(on: On) {
   })
   // Context files, by session id: what each session with huddle wrote.
   on('fs.list', (_, e) => {
-    if (e.path !== '/h/.claude/huddle-context') return { deny: `ENOENT: ${e.path}` }
+    if (e.path !== '/h/.claude/huddle-context' || state.listFails) return { deny: `ENOENT: ${e.path}` }
     state.lists++
     return {
       value: Object.entries(state.context).map(([id, f]) => ({ name: `${id}.json`, kind: 'file', size: 1, mtimeMs: f.mtimeMs, isLink: false })),
@@ -100,6 +102,10 @@ function world(on: On) {
       if (state.stopFails) return { value: { exitCode: 1, stdout: '', stderr: `No job matching '${e.argv[2]}'.`, ...WHOLE } }
       state.peers = state.peers.filter((peer) => peer.id !== e.argv[2])
       return out(`stopped ${e.argv[2]}`)
+    }
+    if (cmd === '/bin/rm') {
+      state.removed.push(...e.argv.slice(2))
+      return out('')
     }
     if (cmd === '/usr/bin/tail') return state.mtimeMs === 0 ? out('', 1) : out(state.lines.map((l) => `${l}\n`).join(''))
     if (cmd === '/bin/sh') {
@@ -357,5 +363,29 @@ test("each session's row shows its context fill; a session without huddle shows 
   await clock.advance(2000)
   expect(day.reads.length).toBe(reads + 1)
   expect(await ui.find({ type: 'Text', text: '55% context' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('files of sessions no longer running are swept once they are a day old', async ($, on) => {
+  const day = world(on)
+  const now = Date.now()
+  day.context = {
+    sid: { mtimeMs: now - 3 * 86_400_000, text: JSON.stringify({ percent: 10 }) },
+    ended: { mtimeMs: now - 2 * 86_400_000, text: JSON.stringify({ percent: 50 }) },
+    recent: { mtimeMs: now - 60_000, text: JSON.stringify({ percent: 50 }) },
+  }
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  // Listed sessions keep theirs however old; a recent one may belong to a session just starting.
+  expect(day.removed).toEqual(['/h/.claude/huddle-context/ended.json'])
+})
+
+test('the session list still shows when the context files cannot be read', async ($, on) => {
+  const day = world(on)
+  day.listFails = true
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▸ Sessions: 3, 2 busy')
   await ui.unmount()
 })

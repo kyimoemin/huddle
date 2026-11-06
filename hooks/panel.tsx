@@ -49,7 +49,8 @@ export async function refreshPeers($: $): Promise<void> {
   let rows: Peer[]
   try {
     const listed = await sessions($)
-    const context = await contextFills($, listed.map((row) => row.sessionId))
+    // The list stands without the figures.
+    const context = await contextFills($, listed.map((row) => row.sessionId)).catch(() => new Map<string, number>())
     rows = sortPeers(
       listed.map(({ sessionId, name, kind, status, id, startedAt }) => ({
         sessionId,
