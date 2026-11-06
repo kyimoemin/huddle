@@ -446,8 +446,12 @@ test('the session list still shows when the context files cannot be read', async
   await ui.unmount()
 })
 
-const reply = (tokens: number, model = 'claude-opus-5-5') =>
-  JSON.stringify({ type: 'assistant', message: { model, usage: { input_tokens: tokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })
+const reply = (tokens: number, model = 'claude-opus-5-5', effort?: string) =>
+  JSON.stringify({
+    type: 'assistant',
+    ...(effort ? { effort } : {}),
+    message: { model, usage: { input_tokens: tokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+  })
 
 test("a session without huddle has its context read off its transcript, as a % where a huddle session on its model gives the window", async ($, on) => {
   const clock = mock.clock(on)
@@ -467,12 +471,19 @@ test("a session without huddle has its context read off its transcript, as a % w
   day.transcripts = {
     '/h/.claude/projects/-Users-me-coach-card/s1.jsonl': { mtimeMs: 1, text: `{"cut\n${reply(250_000)}\n` },
     '/h/.claude/projects/-Users-me-other/s2.jsonl': { mtimeMs: 1, text: `${reply(114_247, 'sonnet')}\n` },
+    // A session with huddle has its effort read off its transcript too.
+    '/h/.claude/projects/-Users-me-Projects-huddle/sid.jsonl': { mtimeMs: 1, text: `${reply(1000, 'claude-opus-5-5', 'max')}\n` },
   }
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('desktop'))
 
   expect(await ui.find({ type: 'Text', text: '~50%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'MAX' })).toBeDefined()
+  // Its context still comes from its own file, not the transcript.
+  expect(await ui.find({ type: 'Text', text: '11%' })).toBeDefined()
+  // A reply with no effort leaves the column blank.
+  expect(await ui.findAll({ type: 'Text', text: /^(L|M|H|X|MAX)$/ })).toHaveLength(1)
   // No huddle session on its model: tokens, not a guessed %.
   expect(await ui.find({ type: 'Text', text: '~114k tok' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /coach\.card/ })).toBeDefined()

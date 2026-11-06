@@ -4,6 +4,7 @@ import {
   addMention,
   appendLine,
   compactTokens,
+  effortBadge,
   handle,
   isMentionable,
   lastContextTokens,
@@ -256,4 +257,17 @@ test('a name a mention cannot spell is not mentionable', () => {
   expect(['sprint 25', 'huddle-5a', 'a.b'].map(isMentionable)).toEqual([true, true, true])
   expect(['café', '_x', 'foo (2)', 'end-'].map(isMentionable)).toEqual([false, false, false, false])
   expect(addMention('hi', 'café')).toBe('hi')
+})
+
+test('effortBadge spells each level in a few cells; none or unknown is blank', () => {
+  expect(['low', 'medium', 'high', 'xhigh', 'max'].map(effortBadge)).toEqual(['L', 'M', 'H', 'X', 'MAX'])
+  expect(effortBadge(undefined)).toBeUndefined()
+  expect(effortBadge('turbo')).toBeUndefined()
+})
+
+test('lastContextTokens reads the effort of the last reply', () => {
+  const row = (effort?: string) =>
+    JSON.stringify({ type: 'assistant', ...(effort ? { effort } : {}), message: { model: 'm', usage: { input_tokens: 5 } } })
+  expect(lastContextTokens(`${row('low')}\n${row('xhigh')}\n`)?.effort).toBe('xhigh')
+  expect(lastContextTokens(`${row()}\n`)).toEqual({ tokens: 5, model: 'm' })
 })

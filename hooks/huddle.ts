@@ -271,12 +271,12 @@ export function transcriptFile(configDir: string, cwd: string, sessionId: string
  * cache-written and cache-read together, as the status line counts them), and
  * its model. Reads from the end; subagent lines are skipped.
  */
-export function lastContextTokens(text: string): { tokens: number; model?: string } | undefined {
+export function lastContextTokens(text: string): { tokens: number; model?: string; effort?: string } | undefined {
   const lines = text.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!
     if (!line.includes('"assistant"') || !line.includes('"usage"')) continue
-    let entry: { type?: unknown; isSidechain?: unknown; message?: { model?: unknown; usage?: Record<string, unknown> } }
+    let entry: { type?: unknown; isSidechain?: unknown; effort?: unknown; message?: { model?: unknown; usage?: Record<string, unknown> } }
     try {
       entry = JSON.parse(line)
     } catch {
@@ -289,9 +289,20 @@ export function lastContextTokens(text: string): { tokens: number; model?: strin
     const tokens = count('input_tokens') + count('cache_read_input_tokens') + count('cache_creation_input_tokens')
     if (tokens === 0) continue
     const model = entry.message?.model
-    return typeof model === 'string' ? { tokens, model } : { tokens }
+    return {
+      tokens,
+      ...(typeof model === 'string' ? { model } : {}),
+      ...(typeof entry.effort === 'string' ? { effort: entry.effort } : {}),
+    }
   }
   return undefined
+}
+
+const EFFORT_BADGES: Record<string, string> = { low: 'L', medium: 'M', high: 'H', xhigh: 'X', max: 'MAX' }
+
+/** An effort level as the session list shows it (`H`, `MAX`); undefined for none or an unknown one. */
+export function effortBadge(level: string | undefined): string | undefined {
+  return level === undefined ? undefined : EFFORT_BADGES[level]
 }
 
 /** A token count in a few characters: `950`, `114k`, `1.2M`. */

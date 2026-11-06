@@ -297,10 +297,12 @@ export type PeerStatus = {
   /** `estimated` when read off its transcript: it has no huddle loaded. No `percent` when its window is unknown. */
   context?: { percent?: number; tokens?: number; estimated?: true }
   post?: { at: number; to: string[] }
+  /** The effort level it last ran at (`high`). */
+  effort?: string
 }
 
 const statuses = new Map<string, { mtimeMs: number; status: Status }>()
-const transcripts = new Map<string, { mtimeMs: number; readAt: number; tokens?: number; model?: string }>()
+const transcripts = new Map<string, { mtimeMs: number; readAt: number; tokens?: number; model?: string; effort?: string }>()
 const TRANSCRIPT_REREAD_MS = 10_000
 /** How often, and past what age, the files of sessions no longer running are removed. */
 const SWEEP_MS = 60 * 60_000
@@ -391,17 +393,22 @@ export async function peerStatuses($: $, rows: readonly SessionRow[]): Promise<M
     const status = published.get(row.sessionId)
     const peer: PeerStatus = {}
     if (status?.post) peer.post = status.post
+    // Every session's transcript says the effort of its last reply; one without huddle, its context too.
+    const read =
+      row.cwd && configDir && isFileSafe(row.sessionId)
+        ? await transcriptTokens($, transcriptFile(configDir, row.cwd, row.sessionId), row.sessionId)
+        : undefined
+    if (read?.effort) peer.effort = read.effort
     if (status?.percent !== undefined) {
       peer.context = { percent: status.percent, ...(status.tokens !== undefined ? { tokens: status.tokens } : {}) }
-    } else if (row.cwd && configDir && isFileSafe(row.sessionId)) {
-      const read = await transcriptTokens($, transcriptFile(configDir, row.cwd, row.sessionId), row.sessionId)
-      if (read?.tokens !== undefined) {
+    } else if (read) {
+      if (read.tokens !== undefined) {
         const window = read.model ? windows.get(modelFamily(read.model)) : undefined
         const percent = window && read.tokens <= window ? clampPercent((read.tokens / window) * 100) : undefined
         peer.context = { ...(percent !== undefined ? { percent } : {}), tokens: read.tokens, estimated: true }
       }
     }
-    if (peer.context || peer.post) out.set(row.sessionId, peer)
+    if (peer.context || peer.post || peer.effort) out.set(row.sessionId, peer)
   }))
   return out
 }
@@ -429,7 +436,7 @@ async function transcriptsRoot($: $): Promise<string | undefined> {
 }
 
 /** A transcript's last reply, read again only when the file changed. */
-async function transcriptTokens($: $, file: string, id: string): Promise<{ tokens?: number; model?: string } | undefined> {
+async function transcriptTokens($: $, file: string, id: string): Promise<{ tokens?: number; model?: string; effort?: string } | undefined> {
   let mtimeMs: number
   try {
     mtimeMs = (await $.fs.stat(file)).mtimeMs

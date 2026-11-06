@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { On, Timer } from 'claude-code'
 import type { Feed, Peer } from '../types'
-import { PERSON_ICON, addMention, isMentionable, compactTokens, dayFile, handle, localDay, sessionIcon, tailFile } from './huddle'
+import { PERSON_ICON, addMention, effortBadge, isMentionable, compactTokens, dayFile, handle, localDay, sessionIcon, tailFile } from './huddle'
 import { focusPeer } from './focus'
 import { type $, channelDir, deliverMentions, errorText, forgetSessions, peerStatuses, post, runClaude, runner, sessions } from './channel'
 
@@ -34,7 +34,7 @@ const draft = atom({ plugin: 'huddle', key: 'draft' } as const, '')
 const typing = atom({ plugin: 'huddle', key: 'typing' } as const, '')
 const postRows = atom({ plugin: 'huddle', key: 'postRows' } as const, 1)
 const notice = atom({ plugin: 'huddle', key: 'notice' } as const, '')
-const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-4' })
+const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-5' })
 const showPeers = atom({ plugin: 'huddle', key: 'showPeers' } as const, true)
 
 /** Background sessions first (the ones Stop applies to), then newest first. */
@@ -70,7 +70,7 @@ export async function refreshPeers($: $): Promise<void> {
     const status = await peerStatuses($, listed).catch(() => new Map<string, never>())
     rows = sortPeers(
       listed.map(({ sessionId, name, kind, status: state, id, startedAt, cwd, pid }) => {
-        const { context, post: last } = status.get(sessionId) ?? {}
+        const { context, post: last, effort } = status.get(sessionId) ?? {}
         // Dropped once old, so the row's arrow goes with the next poll.
         const post = last && now - last.at < TALK_MS ? last : undefined
         const project = cwd?.split('/').filter(Boolean).at(-1)
@@ -85,6 +85,7 @@ export async function refreshPeers($: $): Promise<void> {
           ...(cwd ? { cwd } : {}),
           ...(typeof pid === 'number' ? { pid } : {}),
           ...(context ? { context } : {}),
+          ...(effort ? { effort } : {}),
           ...(post ? { post } : {}),
         }
       }),
@@ -104,6 +105,7 @@ const AGES_MS = 30_000
 let lastPeersWrite = 0
 
 /** Columns of a session row's right side, so every row's bar, figure and age line up. */
+const EFFORT_COLUMNS = 3
 const BAR_COLUMNS = 10
 const PERCENT_COLUMNS = 5
 const AGE_COLUMNS = 3
@@ -418,6 +420,13 @@ export function registerPanel(on: On): void {
               {peer.kind === 'background' && peer.id && !isSelf && (
                 <Button key={`stop-${peer.id}`} label="stop" onPress={() => void stopPeer($, peer)} />
               )}
+              </Box>
+              <Box width={EFFORT_COLUMNS} flexShrink={0} justifyContent="flex-end">
+                {effortBadge(peer.effort) && (
+                  <Text dimColor>
+                    {effortBadge(peer.effort)}
+                  </Text>
+                )}
               </Box>
               <Box width={BAR_COLUMNS} flexShrink={0}>
                 {percent !== undefined ? (

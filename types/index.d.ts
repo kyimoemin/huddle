@@ -27,6 +27,8 @@ export type Peer = {
    * (no huddle loaded there); no `percent` when its window is unknown.
    */
   context?: { percent?: number; tokens?: number; estimated?: true }
+  /** The effort level it last ran at (`high`); absent on a model without effort. */
+  effort?: string
   /** Its last post through huddle, and the names it mentioned. */
   post?: { at: number; to: string[] }
 }
