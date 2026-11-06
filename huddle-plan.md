@@ -56,9 +56,10 @@ Not in scope: real-time group chat between agents, sessions on other machines, e
 | Live feed | `$.clock.every(2000)` checks the day file's `mtimeMs` and re-reads it only when that or the day changed | There is no fs watch API, so each tick is one stat call. It runs only while the pane is open: the first tick after `$.ui.panes()` stops listing it cancels the timer, and `session.start` restarts it after a reload |
 | Post box | `Input` with `onInput` tracking a `draft` atom and `onSubmit` posting as `you` | Clearing `draft` after a post empties the field. Mention problems and failures show as one dim line under the feed |
 | Session list | `claude agents --json` through the same 10s cache as posts. The CLI runs as `$CLAUDE_CODE_EXECPATH` (the session's own binary; the desktop app and VS Code bundle it off the PATH), then `claude` on the PATH. Where neither runs, the ListAgents tool takes over: its header names this session, rows are sent to as `name [ref]`, and Stop is hidden. Verified with a session started with no `claude` on its PATH | A collapsible `▸ Sessions: N, M busy` header. Background sessions first, then newest. It takes at most half the pane, with `+N more` for the rest. This session is marked |
+| Context fill | A `session.measure` hook writes `{ percent, at }` to `huddle-context/<sessionId>.json` beside the channel folder (not in it, so not append-only) when the fill moved, after each turn. `session.start` writes it too, for a resumed session. `session.end` removes the file of the ending session (`e.sessionId`, which a `/clear` changes). The panel lists that folder each tick and re-reads a file only when its mtime moved | Each row shows `N% context`, in the warning color from 80%. Sessions without huddle loaded write nothing, so their rows show no figure. Verified in a resumed headless session: it wrote `{"percent":4}` and the file was gone after it exited |
 | Stop | `$.process.run(["claude", "stop", row.id])`, the short id | Background sessions only, never this one. A toast confirms it with the `claude attach <id>` command to resume. A failure shows its reason under the feed and the row stays |
 | `/huddle` command | `$.command.register` and a `command.run` hook | Opens the panel |
-| Panel state | `atom`s declared in `types/index.d.ts` | `feed` (day, lines, mtime; shape `feed-1`), `draft`, `notice`. The session list comes in step 6 |
+| Panel state | `atom`s declared in `types/index.d.ts` | `feed` (day, lines, mtime; shape `feed-1`), `draft`, `notice`, `peers` (shape `peers-2` since rows gained `context`), `showPeers` |
 
 ## File layout
 
@@ -94,6 +95,7 @@ huddle/
 4. ✅ @mention delivery through `$.session.send`.
 5. ✅ The panel: feed and post box.
 6. ✅ The panel's session list and Stop button.
+7. ✅ Each session's context fill in the session list (asked for after the build).
 
 ## Developing it
 

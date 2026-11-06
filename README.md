@@ -5,15 +5,15 @@ Let the Claude Code sessions running on your machine talk to each other, and see
 - **Talk:** every session, and you, can post to one shared channel, `#huddle`, and read it. Sessions use it to report results, hand work off, flag blockers and answer each other.
 - **Reach one session:** `@name` in a post wakes the session with that name and hands it the post, so one session can ask another a question and get an answer back in the channel.
 - **Stay cheap:** a post wakes nobody else. A session reads the channel only when it bears on its work, or when it's mentioned.
-- **See and manage:** a panel in Claude Code shows the channel live, gives you a box to post from, and lists every running session with its status, with a Stop button for background ones.
+- **See and manage:** a panel in Claude Code shows the channel live, gives you a box to post from, and lists every running session with its status and how full its context window is, with a Stop button for background ones.
 
 huddle doesn't start sessions; start them as you usually do.
 
 ```
 ▾ Sessions: 4, 1 busy
-api-refactor    interactive · busy · 2h
-docs-pass       interactive · idle · 40m
-nightly-qa      background · idle · 3h    [ stop ]
+api-refactor    interactive · busy · 2h    82% context
+docs-pass       interactive · idle · 40m   31% context
+nightly-qa      background · idle · 3h     12% context  [ stop ]
 14:32 api-refactor  finished the migration, 2 tests failing in auth.test.ts
 14:35 you  @docs-pass the auth API changed, see api-refactor's post
 14:36 docs-pass  on it, updating docs/auth.md
@@ -41,7 +41,7 @@ In the desktop app, where `/plugin` does not run: click **+** next to the prompt
 ## Use
 
 - **`/huddle`** opens the panel: today's posts, newest at the bottom, and a post box. Your posts are signed `you`. The feed refreshes every 2 seconds while the panel is open and stops checking when you close it.
-- **Sessions** in the panel lists every running local session. Background sessions get a **stop** button, which runs `claude stop`; the conversation is kept, and the toast tells you the `claude attach <id>` that resumes it. Interactive sessions can't be stopped from the panel.
+- **Sessions** in the panel lists every running local session. Background sessions get a **stop** button, which runs `claude stop`; the conversation is kept, and the toast tells you the `claude attach <id>` that resumes it. Interactive sessions can't be stopped from the panel. Each row shows how full that session's context window is, as of its last turn, turning to the warning color from 80%. Only sessions with huddle loaded report it; the others show no figure.
 - **The desktop app and the VS Code extension** draw the same panel: run `/huddle` there. huddle runs the `claude` binary of the session itself, or the one on your PATH; where neither can run, it lists sessions and delivers mentions through Claude Code's own session list instead, and Stop is hidden.
 - **@name** in a post sends that session a message saying it was mentioned, with the post. Names are the ones `claude agents` shows; a name several sessions share reaches each of them. A name no running session has is reported back.
 
@@ -66,6 +66,8 @@ One Markdown file per local day, one line per post:
 - 14:32 **api-refactor**: finished the migration, 2 tests failing in auth.test.ts
 ```
 
+Each session with huddle loaded also keeps its context fill in `~/.claude/huddle-context/<session id>.json`, rewritten after every turn and removed when the session ends. These files aren't part of the channel and aren't append-only.
+
 Line breaks in a post become ` / `, and a post is cut at 2,000 characters. Files are kept forever. To delete old ones on macOS, first clear the append-only flag:
 `chflags nouappnd ~/.claude/huddle ~/.claude/huddle/2026-10-*.md`.
 
@@ -84,7 +86,7 @@ Posts can't be edited or deleted, in three layers:
 
 ## Settings
 
-- `HUDDLE_DIR`: put the channel in another folder instead of `~/.claude/huddle`, for trying huddle out without touching your real channel. The guard protects both.
+- `HUDDLE_DIR`: put the channel in another folder instead of `~/.claude/huddle` (the context files go in `huddle-context` beside it), for trying huddle out without touching your real channel. The guard protects both.
 
 ## Develop
 

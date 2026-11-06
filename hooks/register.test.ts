@@ -35,6 +35,8 @@ function engine(
   on('session.cwd', () => ({ value: '/Users/me/Projects/huddle' }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('ui.panes', () => ({ value: [] }))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  on('session.end', () => ({ sessionId: 'sid' }))
   on('process.run', (_, e) => {
     runs.push(e.argv)
     const isCli = e.argv[0] === 'claude' || (cli.execPath !== undefined && e.argv[0] === cli.execPath)
@@ -405,4 +407,39 @@ test("a bundled binary that runs but fails is retried as claude on the PATH", as
 
   expect(String(done.result)).toContain('**huddle-5a**')
   expect(runs.filter((argv) => argv[1] === 'agents').map((argv) => argv[0])).toEqual(['/old/claude', 'claude'])
+})
+
+test("each turn's context fill is written for the panels; the session's end removes it", async ($, on) => {
+  const { runs } = engine(on)
+  const writes: { path: string; text: string }[] = []
+  on('fs.write', (_, e) => {
+    writes.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000, percent: 12 }, rateLimits: [] } }))
+  await $.session.start({ cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true })
+  // A resumed session reports what it already holds.
+  expect(writes.map((w) => w.path)).toEqual(['/h/.claude/huddle-context/sid.json'])
+  expect(JSON.parse(writes[0]!.text).percent).toBe(12)
+
+  await $.session.measure({ context: { window: 200_000, tokens: 84_600, percent: 42.3 }, rateLimits: [], changed: ['context'] })
+  expect(JSON.parse(writes.at(-1)!.text).percent).toBe(42)
+  // A cost-only measurement leaves the file alone.
+  await $.session.measure({ context: { window: 200_000, percent: 42 }, rateLimits: [], changed: ['cost'] })
+  expect(writes).toHaveLength(2)
+
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 'sid', resume: { id: 'sid' } })
+  expect(runs.at(-1)).toEqual(['/bin/rm', '-f', '/h/.claude/huddle-context/sid.json'])
+})
+
+test('with HUDDLE_DIR set, the context files sit beside it', async ($, on) => {
+  engine(on, undefined, '/tmp/scratch/chan')
+  const paths: string[] = []
+  on('fs.write', (_, e) => {
+    paths.push(e.path)
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true })
+  await $.session.measure({ context: { window: 200_000, percent: 7 }, rateLimits: [], changed: ['context'] })
+  expect(paths).toEqual(['/tmp/scratch/huddle-context/sid.json'])
 })

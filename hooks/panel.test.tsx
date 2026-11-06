@@ -44,6 +44,9 @@ function world(on: On) {
     toasts: [] as string[],
     stops: [] as string[],
     stopFails: false,
+    context: {} as Record<string, { mtimeMs: number; text: string }>,
+    lists: 0,
+    reads: [] as string[],
     peers: [
       { sessionId: 'sid', name: 'huddle-5a', kind: 'interactive', status: 'busy', startedAt: 1000 },
       { sessionId: 's1', name: 'coachcard-1e', kind: 'interactive', status: 'idle', startedAt: 2000 },
@@ -73,6 +76,20 @@ function world(on: On) {
     return state.mtimeMs === 0
       ? { deny: `ENOENT: ${e.path}` }
       : { value: { kind: 'file', size: 1, mtimeMs: state.mtimeMs, isLink: false } }
+  })
+  // Context files, by session id: what each session with huddle wrote.
+  on('fs.list', (_, e) => {
+    if (e.path !== '/h/.claude/huddle-context') return { deny: `ENOENT: ${e.path}` }
+    state.lists++
+    return {
+      value: Object.entries(state.context).map(([id, f]) => ({ name: `${id}.json`, kind: 'file', size: 1, mtimeMs: f.mtimeMs, isLink: false })),
+    }
+  })
+  on('fs.read', (_, e) => {
+    state.reads.push(e.path)
+    const id = e.path.split('/').at(-1)!.replace(/\.json$/, '')
+    const f = state.context[id]
+    return f ? { value: f.text } : { deny: `ENOENT: ${e.path}` }
   })
   on('process.run', (_, e) => {
     const [cmd] = e.argv
@@ -309,5 +326,36 @@ test("mentioning this session from its own panel prompts it instead of dropping 
   expect(prompts[0]).toContain('You were mentioned in #huddle by you:')
   expect(prompts[0]).toContain('**you**: @huddle-5a please rebase')
   expect(await ui.find({ type: 'Text', text: /no running session/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("each session's row shows its context fill; a session without huddle shows none", async ($, on) => {
+  const clock = mock.clock(on)
+  const day = world(on)
+  day.context = {
+    sid: { mtimeMs: 1, text: JSON.stringify({ percent: 42, at: 1 }) },
+    'bg-full': { mtimeMs: 1, text: JSON.stringify({ percent: 91, at: 1 }) },
+    gone: { mtimeMs: 1, text: JSON.stringify({ percent: 5, at: 1 }) },
+  }
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  await ui.press({ key: 'peers' })
+
+  expect((await ui.find({ type: 'Text', text: '42% context' }))?.props.color).toBeUndefined()
+  // Nearly full is drawn in the warning color.
+  expect((await ui.find({ type: 'Text', text: '91% context' }))?.props.color).toBe('warning')
+  expect(await ui.findAll({ type: 'Text', text: /% context/ })).toHaveLength(2)
+  // A file whose session is not running is not read.
+  expect(day.reads.some((path) => path.includes('gone'))).toBe(false)
+
+  // The poll lists the folder each tick but reads a file again only once it changed.
+  const reads = day.reads.length
+  await clock.advance(2000)
+  expect(day.reads.length).toBe(reads)
+  day.context.sid = { mtimeMs: 2, text: JSON.stringify({ percent: 55, at: 2 }) }
+  await clock.advance(2000)
+  expect(day.reads.length).toBe(reads + 1)
+  expect(await ui.find({ type: 'Text', text: '55% context' })).toBeDefined()
   await ui.unmount()
 })

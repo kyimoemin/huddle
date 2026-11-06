@@ -1,7 +1,7 @@
 import type { Register } from 'claude-code'
 import { huddleDir } from './huddle'
 import { absolute, bashRewriteReason, collapse, isInside, type Where } from './guard'
-import { type $, deliverMentions, errorText, ownName, post, read } from './channel'
+import { type $, deliverMentions, errorText, ownName, post, publishContext, read, unpublishContext } from './channel'
 import { registerPanel, startPanel } from './panel'
 
 // Literal so `claude plugin validate` can read the matchers that use them.
@@ -95,7 +95,28 @@ export const register: Register = (on) => {
       isDeferred: false,
     })
     await startPanel($)
+    // A resumed session knows its fill before its first turn.
+    try {
+      const { percent } = (await $.session.usage()).context
+      if (percent !== undefined) await publishContext($, percent)
+    } catch {
+      // Reported after the next turn instead.
+    }
     return started
+  })
+
+  // Every session reports its context fill, so each panel can show everyone's.
+  on('session.measure', async ($, e, next) => {
+    const measured = await next(e)
+    if (e.changed.includes('context') && e.context.percent !== undefined) {
+      await publishContext($, e.context.percent).catch(() => {})
+    }
+    return measured
+  })
+
+  on('session.end', async ($, e, next) => {
+    await unpublishContext($, e.sessionId).catch(() => {})
+    return next(e)
   })
 
   on('tool.call', { tool: POST_TOOL }, async ($, e) => {
