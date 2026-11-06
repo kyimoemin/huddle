@@ -33,6 +33,10 @@ const HEADER_ROWS = 1
 const DIVIDER_ROWS = 1
 /** Rows a long post shows until opened, plus its `more` row. */
 const COLLAPSED_ROWS = 3
+/** Pane columns from which the sessions move to a sidebar beside the feed. */
+export const WIDE_COLUMNS = 100
+/** The sidebar's columns in the wide layout. */
+const SIDEBAR_COLUMNS = 32
 /** How long a notice stays under the feed. */
 const NOTICE_MS = 30_000
 /** The most sessions the @ suggestions list. */
@@ -575,7 +579,9 @@ export function registerPanel(on: On): void {
     const now = await $.clock.now()
 
     const bodyRows = e.props.scroll.bodyRows
-    const columns = e.props.bodyColumns
+    // Wide, the sessions sit in a sidebar and the feed takes the rest.
+    const isWide = e.props.bodyColumns >= WIDE_COLUMNS
+    const columns = isWide ? e.props.bodyColumns - SIDEBAR_COLUMNS - 1 : e.props.bodyColumns
     paneColumns = columns
 
     // The session list: the active sessions, the idle ones folded into one row unless All is picked.
@@ -593,7 +599,9 @@ export function registerPanel(on: On): void {
         ? candidates.slice(0, Math.max(1, Math.floor((listRoom - 1) / peerRows)))
         : candidates
     const hidden = isListOpen ? candidates.length - listed.length : 0
-    const listRows = HEADER_ROWS + listed.length * peerRows + (hidden > 0 ? 1 : 0) + (hasFold ? 1 : 0) + DIVIDER_ROWS
+    const listRows = isWide
+      ? HEADER_ROWS + DIVIDER_ROWS
+      : HEADER_ROWS + listed.length * peerRows + (hidden > 0 ? 1 : 0) + (hasFold ? 1 : 0) + DIVIDER_ROWS
 
     // The @ suggestions, while a mention is typed.
     const picks = query === null ? [] : suggest(everyone, query)
@@ -809,163 +817,272 @@ export function registerPanel(on: On): void {
 
     const rule = Math.max(0, columns - ' Today '.length)
 
-    return (
-      // The feed shrinks and clips its oldest posts, so the post box stays in view
-      // where the rows counted above miss what a surface draws (desktop's
-      // proportional text and margins).
-      <Box flexDirection="column" height={isTerminal ? undefined : '100%'}>
-        <Box key="sessions-header" flexDirection="row" gap={1} alignItems="center">
-          <Button
-            key="peers"
-            plain
-            dimColor
-            label={`${isListOpen ? '▾' : '▸'} SESSIONS`}
-            onPress={() => void update($, showPeers, (open) => !open)}
-          />
-          {isListOpen && (
+    const summary = (showIdle: boolean) => (
+      <Text wrap="truncate" size="caption">
+        {working > 0 && <Text color="suggestion">● {working} working </Text>}
+        {waiting > 0 && <Text color="warning">● {waiting} waiting </Text>}
+        {showIdle && resting > 0 && <Text dimColor>○ {resting} idle </Text>}
+        {talks.size > 0 && <Text color="suggestion">· {talks.size} talking</Text>}
+      </Text>
+    )
+
+    const sessionList = (
+      <Box key="sessions" flexDirection="column" flexShrink={0}>
+          <Box key="sessions-header" flexDirection="row" gap={1} alignItems="center">
             <Button
-              key="filter-active"
+              key="peers"
               plain
-              dimColor={filter !== 'active'}
-              label={`Active ${active.length}`}
-              onPress={() => void update($, sessionFilter, () => 'active')}
+              dimColor
+              label={`${isListOpen ? '▾' : '▸'} SESSIONS`}
+              onPress={() => void update($, showPeers, (open) => !open)}
             />
-          )}
-          {isListOpen && (
+            {isListOpen && (
+              <Button
+                key="filter-active"
+                plain
+                dimColor={filter !== 'active'}
+                label={`Active ${active.length}`}
+                onPress={() => void update($, sessionFilter, () => 'active')}
+              />
+            )}
+            {isListOpen && (
+              <Button
+                key="filter-all"
+                plain
+                dimColor={filter !== 'all'}
+                label={`All ${everyone.length}`}
+                onPress={() => void update($, sessionFilter, () => 'all')}
+              />
+            )}
+            {summary(!isListOpen)}
+          </Box>
+          {listed.map(peerRow)}
+          {hidden > 0 && <Text dimColor>+{hidden} more</Text>}
+          {hasFold && (
             <Button
-              key="filter-all"
+              key="idle-fold"
               plain
-              dimColor={filter !== 'all'}
-              label={`All ${everyone.length}`}
+              dimColor
+              label={`○ ${idle.length} idle · ${idle
+                .slice(0, 3)
+                .map((peer) => peer.name)
+                .join(', ')}${idle.length > 3 ? '…' : ''}`}
               onPress={() => void update($, sessionFilter, () => 'all')}
             />
           )}
-          <Text wrap="truncate" size="caption">
-            {working > 0 && <Text color="suggestion">● {working} working </Text>}
-            {waiting > 0 && <Text color="warning">● {waiting} waiting </Text>}
-            {!isListOpen && resting > 0 && <Text dimColor>○ {resting} idle </Text>}
-            {talks.size > 0 && <Text color="suggestion">· {talks.size} talking</Text>}
-          </Text>
-        </Box>
-        {listed.map(peerRow)}
-        {hidden > 0 && <Text dimColor>+{hidden} more</Text>}
-        {hasFold && (
+      </Box>
+    )
+
+    // The wide layout's sidebar: every session, grouped by what it is doing.
+    const sideRow = (peer: Peer) => {
+      const word = statusWord(peer)
+      const { percent, estimated } = peer.context ?? {}
+      const isFull = percent !== undefined && percent >= CONTEXT_WARN
+      return (
+        <Box key={`peer-${peer.sessionId}`} flexDirection="row" gap={1} alignItems="center">
+          <Text color={statusColor(word)}>{word === 'idle' ? '○' : '●'}</Text>
           <Button
-            key="idle-fold"
+            key={`focus-${peer.sessionId}`}
             plain
-            dimColor
-            label={`○ ${idle.length} idle · ${idle
-              .slice(0, 3)
-              .map((peer) => peer.name)
-              .join(', ')}${idle.length > 3 ? '…' : ''}`}
-            onPress={() => void update($, sessionFilter, () => 'all')}
-          />
-        )}
-        <Text dimColor size="caption" wrap="truncate">
-          {`${'─'.repeat(Math.floor(rule / 2))} Today ${'─'.repeat(Math.ceil(rule / 2))}`}
-        </Text>
-        <Box
-          flexDirection="column"
-          flexGrow={1}
-          flexShrink={1}
-          minHeight={0}
-          overflow="hidden"
-          justifyContent="flex-end"
-          rowGap={isTerminal ? 0 : 'md'}
-        >
-          {shown.length === 0 && <Text dimColor>No posts today. Write one below; type @ to mention a session.</Text>}
-          {shown.map(feedGroup)}
-        </Box>
-        {problem !== '' && <Text dimColor>{problem}</Text>}
-        {picks.length > 0 && (
-          <Box
-            key="suggestions"
-            flexDirection="column"
-            flexShrink={0}
-            borderStyle={isTerminal ? undefined : 'round'}
-            borderColor="subtle"
-            paddingX={isTerminal ? 0 : 1}
-          >
-            <Text dimColor size="caption">
-              {query === '' ? 'Mention a session' : `Sessions matching “${query}”`} · ↑ to pick
-            </Text>
-            {picks.map((peer) => {
-              const tag = handle(peer.name)
-              const at = query ? tag.toLowerCase().indexOf(query.toLowerCase()) : -1
-              const word = statusWord(peer)
-              const fill = peer.context?.percent
-              return (
-                <Button
-                  key={`suggest-${peer.sessionId}`}
-                  plain
-                  label={`@${tag}`}
-                  onPress={() =>
-                    void read($, typing).then((text) => {
-                      const done = completeMention(text, peer.name)
-                      return setPostBox($, done === text ? addMention(text, peer.name) : done)
-                    })
-                  }
-                >
-                  @{at >= 0 ? tag.slice(0, at) : tag}
-                  {at >= 0 && <Text color="suggestion">{tag.slice(at, at + query!.length)}</Text>}
-                  {at >= 0 ? tag.slice(at + query!.length) : ''}
-                  <Text dimColor>
-                    {' '}
-                    {[
-                      `${word}${peer.startedAt ? ` ${ago(now - peer.startedAt)}` : ''}`,
-                      peer.project ?? '',
-                      fill !== undefined ? `${fill}% context` : '',
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </Text>
-                </Button>
-              )
-            })}
-          </Box>
-        )}
-        <Box
-          key="post-row"
-          width="100%"
-          flexShrink={0}
-          flexDirection="row"
-          alignItems="flex-end"
-          gap={1}
-          borderStyle={isTerminal ? undefined : 'round'}
-          borderColor="promptBorder"
-          paddingX={isTerminal ? 0 : 1}
-        >
-          <Box flexGrow={1} flexShrink={1} minWidth={0}>
-            <Input
-              key="post"
-              placeholder="Message #huddle · type @ to mention"
-              value={typed}
-              rows={rows}
-              submitLabel="post"
-              onInput={(value) => void noteTyping($, value)}
-              onSubmit={(value) => void submit($, value)}
-            />
-          </Box>
-          <Button
-            key="mention-picker"
-            plain
-            dimColor={query === null}
-            label="@"
+            label={isTerminal ? sessionIcon(peer.sessionId) : `Show ${peer.name}`}
             onPress={() =>
-              void (query === null
-                ? read($, typing).then((text) => setPostBox($, startMention(text)))
-                : update($, mentionQuery, () => null))
+              void focusPeer($, peer)
+                .then((problem) => (problem ? say($, problem) : undefined))
+                .catch(() => {})
             }
-          />
-          {!isTerminal && (
-            <Button key="send" variant="primary" label="Send" onPress={() => void read($, typing).then((text) => submit($, text))} />
+          >
+            {avatar(peer.name, peer.sessionId)}
+          </Button>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+            <Box flexDirection="row" gap={1} minWidth={0} overflow="hidden">
+              <Button key={`mention-${peer.sessionId}`} plain dimColor={word === 'idle'} label={peer.name} onPress={() => mention(peer)} />
+              {peer.sessionId === selfId && (
+                <Text backgroundColor="suggestion" color="inverseText" size="caption" weight="semibold">
+                  YOU
+                </Text>
+              )}
+              {peer.kind === 'background' && peer.id && peer.sessionId !== selfId && (
+                <Button key={`stop-${peer.id}`} label="stop" onPress={() => void stopPeer($, peer)} />
+              )}
+            </Box>
+            {!isTerminal && (
+              <Text dimColor size="caption" wrap="truncate">
+                {[peer.project ?? '', peer.startedAt ? ago(now - peer.startedAt) : ''].filter(Boolean).join(' · ')}
+              </Text>
+            )}
+          </Box>
+          {percent !== undefined && (
+            <Text tabular mono dimColor={!isFull} color={isFull ? 'warning' : undefined}>
+              {estimated ? '~' : ''}
+              {percent}%
+            </Text>
           )}
         </Box>
+      )
+    }
+    const sideGroups = [
+      { title: 'WORKING', color: 'suggestion', peers: everyone.filter((peer) => statusWord(peer) === 'working') },
+      { title: 'WAITING', color: 'warning', peers: everyone.filter((peer) => !['working', 'idle'].includes(statusWord(peer))) },
+      { title: 'IDLE', color: 'inactive', peers: everyone.filter((peer) => statusWord(peer) === 'idle') },
+    ].filter((group) => group.peers.length > 0)
+    // Rows the sidebar has for its groups: the pane less its title, a row kept for `+N more`.
+    let sideRoom = Math.max(1, Math.floor((bodyRows - 2) / peerRows))
+    let sideHidden = 0
+    const sidebar = (
+      <Box key="sidebar" flexDirection="column" width={SIDEBAR_COLUMNS} flexShrink={0} gap={isTerminal ? 0 : 'sm'} overflow="hidden">
+        <Text weight="semibold" size="heading">
+          <Text dimColor>#</Text> huddle
+        </Text>
+        {sideGroups.map((group) => {
+          const fit = group.peers.slice(0, Math.max(0, sideRoom - 1))
+          sideRoom -= fit.length + 1
+          sideHidden += group.peers.length - fit.length
+          return (
+            fit.length > 0 && (
+              <Box key={`side-${group.title}`} flexDirection="column">
+                <Text color={group.color} size="caption" weight="semibold">
+                  {group.title} · {group.peers.length}
+                </Text>
+                {fit.map(sideRow)}
+              </Box>
+            )
+          )
+        })}
+        {sideHidden > 0 && <Text dimColor>+{sideHidden} more</Text>}
+      </Box>
+    )
+
+    const main = (
+      <Box key="main" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} minHeight={0}>
+        {isWide && (
+          <Box key="main-header" flexDirection="row" gap={1}>
+            <Text weight="semibold">All messages</Text>
+            <Text dimColor size="caption">
+              {everyone.length} sessions
+            </Text>
+            {summary(false)}
+          </Box>
+        )}
+          <Text dimColor size="caption" wrap="truncate">
+            {`${'─'.repeat(Math.floor(rule / 2))} Today ${'─'.repeat(Math.ceil(rule / 2))}`}
+          </Text>
+          <Box
+            flexDirection="column"
+            flexGrow={1}
+            flexShrink={1}
+            minHeight={0}
+            overflow="hidden"
+            justifyContent="flex-end"
+            rowGap={isTerminal ? 0 : 'md'}
+          >
+            {shown.length === 0 && <Text dimColor>No posts today. Write one below; type @ to mention a session.</Text>}
+            {shown.map(feedGroup)}
+          </Box>
+          {problem !== '' && <Text dimColor>{problem}</Text>}
+          {picks.length > 0 && (
+            <Box
+              key="suggestions"
+              flexDirection="column"
+              flexShrink={0}
+              borderStyle={isTerminal ? undefined : 'round'}
+              borderColor="subtle"
+              paddingX={isTerminal ? 0 : 1}
+            >
+              <Text dimColor size="caption">
+                {query === '' ? 'Mention a session' : `Sessions matching “${query}”`} · ↑ to pick
+              </Text>
+              {picks.map((peer) => {
+                const tag = handle(peer.name)
+                const at = query ? tag.toLowerCase().indexOf(query.toLowerCase()) : -1
+                const word = statusWord(peer)
+                const fill = peer.context?.percent
+                return (
+                  <Button
+                    key={`suggest-${peer.sessionId}`}
+                    plain
+                    label={`@${tag}`}
+                    onPress={() =>
+                      void read($, typing).then((text) => {
+                        const done = completeMention(text, peer.name)
+                        return setPostBox($, done === text ? addMention(text, peer.name) : done)
+                      })
+                    }
+                  >
+                    @{at >= 0 ? tag.slice(0, at) : tag}
+                    {at >= 0 && <Text color="suggestion">{tag.slice(at, at + query!.length)}</Text>}
+                    {at >= 0 ? tag.slice(at + query!.length) : ''}
+                    <Text dimColor>
+                      {' '}
+                      {[
+                        `${word}${peer.startedAt ? ` ${ago(now - peer.startedAt)}` : ''}`,
+                        peer.project ?? '',
+                        fill !== undefined ? `${fill}% context` : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </Text>
+                  </Button>
+                )
+              })}
+            </Box>
+          )}
+          <Box
+            key="post-row"
+            width="100%"
+            flexShrink={0}
+            flexDirection="row"
+            alignItems="flex-end"
+            gap={1}
+            borderStyle={isTerminal ? undefined : 'round'}
+            borderColor="promptBorder"
+            paddingX={isTerminal ? 0 : 1}
+          >
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
+              <Input
+                key="post"
+                placeholder="Message #huddle · type @ to mention"
+                value={typed}
+                rows={rows}
+                submitLabel="post"
+                onInput={(value) => void noteTyping($, value)}
+                onSubmit={(value) => void submit($, value)}
+              />
+            </Box>
+            <Button
+              key="mention-picker"
+              plain
+              dimColor={query === null}
+              label="@"
+              onPress={() =>
+                void (query === null
+                  ? read($, typing).then((text) => setPostBox($, startMention(text)))
+                  : update($, mentionQuery, () => null))
+              }
+            />
+            {!isTerminal && (
+              <Button key="send" variant="primary" label="Send" onPress={() => void read($, typing).then((text) => submit($, text))} />
+            )}
+          </Box>
         {!isTerminal && (
           <Text dimColor size="caption">
             Enter to send · Shift+Enter for a new line
           </Text>
         )}
+      </Box>
+    )
+
+    // The feed shrinks and clips its oldest posts, so the post box stays in view
+    // where the rows counted above miss what a surface draws (desktop's
+    // proportional text and margins).
+    return isWide ? (
+      <Box flexDirection="row" gap={1} height={isTerminal ? undefined : '100%'}>
+        {sidebar}
+        {main}
+      </Box>
+    ) : (
+      <Box flexDirection="column" height={isTerminal ? undefined : '100%'}>
+        {sessionList}
+        {main}
       </Box>
     )
   })

@@ -871,3 +871,26 @@ test('your consecutive posts share one time range; the idle sessions fold into o
   expect(await ui.find({ key: 'mention-s1' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('a wide pane puts every session in a sidebar, grouped by what it is doing', async ($, on) => {
+  const day = world(on)
+  day.lines = ['- 14:32 **coachcard-1e**: QA is green']
+  day.mtimeMs = 1
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  for (const surface of SURFACES) {
+    const pane = PANE(surface)
+    const ui = await $.ui.mount({ ...pane, props: { ...pane.props, bodyColumns: 140, scroll: { offset: 0, bodyRows: 30 } } })
+    expect(await ui.find({ key: 'sidebar' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'WORKING · 2' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'IDLE · 1' })).toBeDefined()
+    // No filter or toggle there: the idle session is listed too.
+    expect(await ui.find({ key: 'peers' })).toBeUndefined()
+    expect(await ui.find({ key: 'mention-s1' })).toBeDefined()
+    expect(await ui.find({ key: 'stop-bg1' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'All messages' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /QA is green/ })).toBeDefined()
+    expect((await ui.find({ key: 'post' }))?.type).toBe('Input')
+    await ui.unmount()
+  }
+})
