@@ -120,6 +120,8 @@ export type SessionRow = {
   /** The short id `claude stop` takes; background sessions only, and only from the CLI. */
   id?: string
   startedAt?: number
+  /** Its working directory; from the CLI only. */
+  cwd?: string
   /**
    * How `$.session.send` addresses it when `sessionId` is not a real one: the
    * `name [ref]` spelling ListAgents shows, for rows read from that tool.
@@ -154,7 +156,7 @@ export function resolveMentions(
   for (const name of names) {
     const lower = name.toLowerCase()
     if (NOT_SESSIONS.has(lower)) continue
-    const matches = rows.filter((row) => row.name.toLowerCase() === lower)
+    const matches = rows.filter((row) => row.name.toLowerCase() === lower || handle(row.name).toLowerCase() === lower)
     if (matches.length === 0) unknown.push(name)
     for (const row of matches) {
       if (row.sessionId === selfId) {
@@ -216,4 +218,74 @@ export function parseListAgents(result: ListAgentsResult, selfId: string): Sessi
     }
   }
   return rows
+}
+
+/**
+ * How a post @mentions a session: its name with each run of spaces a dash
+ * (`sprint 25` is `@sprint-25`), since a mention ends at a space.
+ */
+export function handle(name: string): string {
+  return name.trim().replace(/\s+/g, '-')
+}
+
+/** `@handle ` added to a draft: after a space, and not again when the draft has it. */
+export function addMention(draft: string, name: string): string {
+  const tag = `@${handle(name)}`
+  if (parseMentions(draft).some((seen) => seen.toLowerCase() === tag.slice(1).toLowerCase())) return draft
+  return `${draft}${draft === '' || /\s$/.test(draft) ? '' : ' '}${tag} `
+}
+
+const ICONS = [
+  '🦊', '🐙', '🦉', '🐢', '🦄', '🐝', '🦋', '🐬', '🦁', '🐼', '🐧', '🦜',
+  '🐳', '🦔', '🐸', '🦩', '🐨', '🦦', '🐯', '🦀', '🐞', '🦭', '🐺', '🦥',
+] as const
+
+/** A session's icon: one emoji picked by its id, the same on every panel and after a restart. */
+export function sessionIcon(sessionId: string): string {
+  let hash = 0
+  for (const char of sessionId) hash = (Math.imul(hash, 31) + char.codePointAt(0)!) | 0
+  return ICONS[Math.abs(hash) % ICONS.length]!
+}
+
+/** The person's icon in the feed. */
+export const PERSON_ICON = '👤'
+
+/** Where Claude Code keeps a session's transcripts: the cwd with every other character a dash. */
+export function transcriptFile(configDir: string, cwd: string, sessionId: string): string {
+  return `${configDir.replace(/\/+$/, '')}/projects/${cwd.replace(/[^A-Za-z0-9]/g, '-')}/${sessionId}.jsonl`
+}
+
+/**
+ * The input tokens of a transcript's last main-thread reply (uncached,
+ * cache-written and cache-read together, as the status line counts them), and
+ * its model. Reads from the end; subagent lines are skipped.
+ */
+export function lastContextTokens(text: string): { tokens: number; model?: string } | undefined {
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!
+    if (!line.includes('"assistant"') || !line.includes('"usage"')) continue
+    let entry: { type?: unknown; isSidechain?: unknown; message?: { model?: unknown; usage?: Record<string, unknown> } }
+    try {
+      entry = JSON.parse(line)
+    } catch {
+      continue // The cut first line of a tail, or one being written.
+    }
+    if (entry.type !== 'assistant' || entry.isSidechain === true) continue
+    const usage = entry.message?.usage
+    if (!usage) continue
+    const count = (key: string) => (typeof usage[key] === 'number' ? (usage[key] as number) : 0)
+    const tokens = count('input_tokens') + count('cache_read_input_tokens') + count('cache_creation_input_tokens')
+    if (tokens === 0) continue
+    const model = entry.message?.model
+    return typeof model === 'string' ? { tokens, model } : { tokens }
+  }
+  return undefined
+}
+
+/** A token count in a few characters: `950`, `114k`, `1.2M`. */
+export function compactTokens(tokens: number): string {
+  if (tokens < 1000) return String(tokens)
+  if (tokens < 1_000_000) return `${Math.round(tokens / 1000)}k`
+  return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
 }
