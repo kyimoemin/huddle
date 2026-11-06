@@ -95,6 +95,21 @@ test('HUDDLE_DIR moves the channel', async ($, on) => {
   expect(dir).toBe('/tmp/chan')
 })
 
+test('a relative HUDDLE_DIR is taken from the working directory, the context files beside it', async ($, on) => {
+  const { runs } = engine(on, undefined, 'scratch/chan')
+  const paths: string[] = []
+  on('fs.write', (_, e) => {
+    paths.push(e.path)
+    return { value: undefined }
+  })
+  await $.session.start(START)
+  await $.tool.call({ tool: POST_TOOL, text: 'hi' })
+  await $.session.measure({ context: { window: 200_000, percent: 3 }, rateLimits: [], changed: ['context'] })
+
+  expect(runs.find((argv) => argv[0] === '/bin/sh')![6]).toBe('/Users/me/Projects/huddle/scratch/chan')
+  expect(paths).toEqual(['/Users/me/Projects/huddle/scratch/huddle-context/sid.json'])
+})
+
 test('post refuses empty text without writing', async ($, on) => {
   const { runs } = engine(on)
   await $.session.start(START)

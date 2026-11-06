@@ -154,7 +154,17 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    const reason = bashRewriteReason(e.command, await guardWhere($))
+    const where = await guardWhere($)
+    let reason: string | undefined
+    try {
+      reason = bashRewriteReason(e.command, where)
+    } catch {
+      // A hook that throws is skipped, which would let the command run unchecked:
+      // refuse instead when it names anything near the channel.
+      if (/huddle|\.claude/.test(e.command) || where.dirs.some((dir) => e.command.includes(dir))) {
+        reason = 'could not be checked'
+      }
+    }
     return reason === undefined ? next(e) : { deny: refusal(reason) }
   })
 

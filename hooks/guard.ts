@@ -44,26 +44,51 @@ const DELETES_OR_MOVES = new Set([
 const COPIES_ONTO_LAST = new Set(['cp', 'ln', 'rsync', 'install', 'ditto', 'scp'])
 const IN_PLACE_EDITORS = new Set(['sed', 'gsed', 'perl', 'ruby'])
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh'])
-/** Words run before the real command, each with the options of its that take a value. */
-const PREFIXES: Record<string, ReadonlySet<string>> = {
-  sudo: new Set(['-u', '-g', '-U', '-C', '-h', '-p', '-r', '-t', '-D']),
-  xargs: new Set(['-I', '-J', '-L', '-n', '-P', '-s', '-E', '-d', '-a']),
-  env: new Set(['-u', '-C', '-S']),
-  nice: new Set(['-n']),
-  command: new Set(),
-  builtin: new Set(),
-  exec: new Set(['-a']),
-  nohup: new Set(),
-  time: new Set(),
+/**
+ * Words run before the real command: each with its options that take a
+ * value, and how many plain words it takes before the command
+ * (`timeout 5 rm …`). Shell keywords that can lead a command are here too.
+ */
+const PREFIXES: Record<string, { takesValue: ReadonlySet<string>; positionals?: number }> = {
+  sudo: { takesValue: new Set(['-u', '-g', '-U', '-C', '-h', '-p', '-r', '-t', '-D']) },
+  doas: { takesValue: new Set(['-u', '-C']) },
+  xargs: { takesValue: new Set(['-I', '-J', '-L', '-n', '-P', '-s', '-E', '-d', '-a']) },
+  env: { takesValue: new Set(['-u', '-C', '-S']) },
+  nice: { takesValue: new Set(['-n']) },
+  ionice: { takesValue: new Set(['-c', '-n', '-p']) },
+  timeout: { takesValue: new Set(['-s', '-k']), positionals: 1 },
+  gtimeout: { takesValue: new Set(['-s', '-k']), positionals: 1 },
+  chrt: { takesValue: new Set(), positionals: 1 },
+  taskset: { takesValue: new Set(), positionals: 1 },
+  stdbuf: { takesValue: new Set(['-i', '-o', '-e']) },
+  caffeinate: { takesValue: new Set(['-t', '-w']) },
+  exec: { takesValue: new Set(['-a']) },
+  ...Object.fromEntries(
+    ['command', 'builtin', 'nohup', 'time', 'unbuffer', 'noglob', 'nocorrect', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', '!', '{']
+      .map((word) => [word, { takesValue: new Set<string>() }]),
+  ),
 }
 const WRITERS = new Set([...DELETES_OR_MOVES, ...COPIES_ONTO_LAST, ...IN_PLACE_EDITORS, 'tee', 'dd'])
 
-const unquote = (token: string) => token.replace(/["'`]/g, '')
+/** A word as the shell passes it on: quotes dropped, `\\x` read as `x`. */
+const unquote = (token: string) => token.replace(/\\(.)/g, '$1').replace(/["'`]/g, '')
+
+/** The index just past the `)` that closes the `$(` opening at `open`. */
+function closeOfSubstitution(command: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < command.length; i++) {
+    if (command[i] === '\\') i++
+    else if (command[i] === '(') depth++
+    else if (command[i] === ')' && --depth === 0) return i + 1
+  }
+  return command.length
+}
 
 /**
  * The command's simple commands, split on `;`, `&`, `&&`, `||`, `|`, newlines,
- * `$(`, backticks and parentheses outside quotes. Each says whether a pipe
- * fed it, for `… | xargs rm`.
+ * `$(`, backticks and parentheses outside quotes. A `$(…)` or backtick
+ * substitution inside double quotes runs too, so its commands are listed as
+ * well. Each says whether a pipe fed it, for `… | xargs rm`.
  */
 export function splitCommand(command: string): { text: string; isPiped: boolean }[] {
   const out: { text: string; isPiped: boolean }[] = []
@@ -79,6 +104,17 @@ export function splitCommand(command: string): { text: string; isPiped: boolean 
     const c = command[i]!
     if (quote) {
       if (c === quote) quote = undefined
+      else if (quote === '"' && c === '\\') {
+        text += c + (command[++i] ?? '')
+        continue
+      } else if (quote === '"' && (command.startsWith('$(', i) || c === '`')) {
+        const end = c === '`' ? command.indexOf('`', i + 1) + 1 || command.length : closeOfSubstitution(command, i + 1)
+        const inner = command.slice(c === '`' ? i + 1 : i + 2, c === '`' ? end - 1 : end - 1)
+        out.push(...splitCommand(inner))
+        text += command.slice(i, end)
+        i = end - 1
+        continue
+      }
       text += c
       continue
     }
@@ -94,6 +130,9 @@ export function splitCommand(command: string): { text: string; isPiped: boolean 
     const two = command.slice(i, i + 2)
     if (two === '&&' || two === '||') {
       cut(false)
+      i++
+    } else if (two === '|&') {
+      cut(true)
       i++
     } else if (c === '|' && command[i - 1] !== '>') {
       cut(true)
@@ -127,7 +166,39 @@ function segmentPattern(segment: string): RegExp {
       } else source += '\\['
     } else source += c.replace(/[.+^${}()|\\]/g, '\\$&')
   }
-  return new RegExp(`^${source}$`)
+  try {
+    return new RegExp(`^${source}$`)
+  } catch {
+    // A class the shell reads some other way (`[z-a]`): assume it can match.
+    return /^.*$/
+  }
+}
+
+/**
+ * The words a `{a,b}` brace expansion makes of `word`, as the shell would;
+ * `${…}` is left alone. Capped, as no command names hundreds of paths.
+ */
+export function expandBraces(word: string, limit = 64): string[] {
+  for (let open = word.indexOf('{'); open >= 0; open = word.indexOf('{', open + 1)) {
+    if (word[open - 1] === '$') continue
+    let depth = 0
+    const commas: number[] = []
+    let close = -1
+    for (let i = open; i < word.length && close < 0; i++) {
+      if (word[i] === '{') depth++
+      else if (word[i] === '}' && --depth === 0) close = i
+      else if (word[i] === ',' && depth === 1) commas.push(i)
+    }
+    if (close < 0 || commas.length === 0) continue
+    const cuts = [open, ...commas, close]
+    const out: string[] = []
+    for (let k = 0; k + 1 < cuts.length && out.length < limit; k++) {
+      const choice = `${word.slice(0, open)}${word.slice(cuts[k]! + 1, cuts[k + 1])}${word.slice(close + 1)}`
+      out.push(...expandBraces(choice, limit - out.length))
+    }
+    return out
+  }
+  return [word]
 }
 
 /**
@@ -146,16 +217,18 @@ export function relation(path: string, dir: string): 'inside' | 'ancestor' | und
 
 /** Where a shell word stands to the channel; options and assignments stand nowhere. */
 function standing(word: string, where: Where): 'inside' | 'ancestor' | undefined {
-  const token = unquote(word)
-  if (token === '' || token.startsWith('-') || /^[A-Za-z_]\w*=/.test(token)) return undefined
-  if (/\.claude\/huddle(\/|$)/.test(token)) return 'inside'
-  if (!/^[~/.$\w*?[]/.test(token)) return undefined
-  const path = absolute(token, where.cwd, where.home)
+  const whole = unquote(word)
+  if (whole === '' || whole.startsWith('-') || /^[A-Za-z_]\w*=/.test(whole)) return undefined
   let found: 'inside' | 'ancestor' | undefined
-  for (const dir of where.dirs) {
-    const r = relation(path, dir)
-    if (r === 'inside') return r
-    found ??= r
+  for (const token of expandBraces(whole)) {
+    if (/\.claude\/huddle(\/|$)/.test(token)) return 'inside'
+    if (!/^[~/.$\w*?[{]/.test(token)) continue
+    const path = absolute(token, where.cwd, where.home)
+    for (const dir of where.dirs) {
+      const r = relation(path, dir)
+      if (r === 'inside') return r
+      found ??= r
+    }
   }
   return found
 }
@@ -163,13 +236,29 @@ function standing(word: string, where: Where): 'inside' | 'ancestor' | undefined
 const isInsideWord = (word: string, where: Where) => standing(word, where) === 'inside'
 const touchesWord = (word: string, where: Where) => standing(word, where) !== undefined
 
-/** Every redirect target: `>`, `>>`, `>|`, `&>`, `&>>`; not a `>&2` descriptor copy. */
+/** Every redirect target: `>`, `>>`, `>|`, `&>`, `&>>`, `>&file`; not a `>&2` descriptor copy. */
 function redirectTargets(segment: string): string[] {
   const targets: string[] = []
-  for (const match of segment.matchAll(/(?:\d|&)?>>?(?!&)\|?\s*("[^"]*"|'[^']*'|[^\s;&|<>()]+)/g)) {
-    targets.push(match[1]!)
+  for (const match of segment.matchAll(/(?:\d|&)?>>?(&)?\|?\s*("[^"]*"|'[^']*'|[^\s;&|<>()]+)/g)) {
+    if (match[1] && /^(\d+|-)$/.test(match[2]!)) continue
+    targets.push(match[2]!)
   }
   return targets
+}
+
+/** The folder a cp/ln/install/rsync copies into: its `-t` value, else its last word. */
+function copyTarget(args: readonly string[]): { target: string | undefined; sources: string[] } {
+  const plain = args.map(unquote)
+  let target: string | undefined
+  const sources: string[] = []
+  for (let i = 0; i < plain.length; i++) {
+    const word = plain[i]!
+    if (word === '-t' || word === '--target-directory') target = plain[++i]
+    else if (word.startsWith('--target-directory=')) target = word.slice('--target-directory='.length)
+    else if (!word.startsWith('-')) sources.push(word)
+  }
+  if (target === undefined) target = sources.pop()
+  return { target, sources }
 }
 
 /**
@@ -192,13 +281,14 @@ export function bashRewriteReason(command: string, where: Where): string | undef
     let viaXargs = false
     while (start < words.length) {
       const word = unquote(words[start]!)
-      const takesValue = PREFIXES[word]
-      if (takesValue) {
+      const prefix = PREFIXES[word]
+      if (prefix) {
         if (word === 'xargs') viaXargs = true
         start++
         while (start < words.length && unquote(words[start]!).startsWith('-')) {
-          start += takesValue.has(unquote(words[start]!)) ? 2 : 1
+          start += prefix.takesValue.has(unquote(words[start]!)) ? 2 : 1
         }
+        start += prefix.positionals ?? 0
       } else if (/^[A-Za-z_]\w*=/.test(word)) start++
       else break
     }
@@ -208,7 +298,7 @@ export function bashRewriteReason(command: string, where: Where): string | undef
     const touches = args.some((word) => touchesWord(word, where))
 
     // Follow `cd` so a later relative path is judged where it lands.
-    if (name === 'cd') {
+    if (name === 'cd' || name === 'pushd') {
       const to = unquote(args.find((word) => !word.startsWith('-')) ?? '~')
       if (to !== '-' && !to.includes('$(')) cwd = absolute(to, cwd, where.home)
       continue
@@ -227,7 +317,13 @@ export function bashRewriteReason(command: string, where: Where): string | undef
 
     // Deleting, moving or unflagging the folder or anything above it takes the channel too.
     if (DELETES_OR_MOVES.has(name) && touches) return `runs ${name} on it`
-    if (COPIES_ONTO_LAST.has(name) && args.length > 0 && isInsideWord(args.at(-1)!, where)) return `runs ${name} onto it`
+    if (COPIES_ONTO_LAST.has(name)) {
+      // Onto the channel, or into a folder above it under the channel's own name.
+      const { target, sources } = copyTarget(args)
+      const onto = target === undefined ? undefined : standing(target, where)
+      const lands = (source: string) => touchesWord(`${target}/${source.split('/').filter(Boolean).at(-1) ?? ''}`, where)
+      if (onto === 'inside' || (onto === 'ancestor' && sources.some(lands))) return `runs ${name} onto it`
+    }
     if (name === 'rsync' && args.some((word) => unquote(word).startsWith('--delete')) && touchesWord(args.at(-1) ?? '', where)) {
       return 'runs rsync --delete over it'
     }
@@ -241,7 +337,9 @@ export function bashRewriteReason(command: string, where: Where): string | undef
     if (name === 'find' && touches) {
       const plain = args.map(unquote)
       if (plain.includes('-delete')) return 'runs find -delete on it'
-      const writer = plain.find((word, i) => ['-exec', '-execdir', '-ok', '-okdir'].includes(plain[i - 1] ?? '') && WRITERS.has(word))
+      const writer = plain
+        .map((word, i) => ['-exec', '-execdir', '-ok', '-okdir'].includes(plain[i - 1] ?? '') ? word.split('/').at(-1)! : '')
+        .find((word) => WRITERS.has(word))
       if (writer !== undefined) return `runs find -exec ${writer} on it`
     }
   }

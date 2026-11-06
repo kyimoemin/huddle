@@ -16,6 +16,7 @@ import {
   tailFile,
   type Run,
 } from './huddle'
+import { absolute } from './guard'
 
 /** The channel's operations on the engine, shared by the tools and the panel. */
 
@@ -164,8 +165,9 @@ export async function deliverMentions($: $, author: string, text: string, line: 
 /** The channel folder: `$HUDDLE_DIR` when set (for testing), else ~/.claude/huddle. */
 export async function channelDir($: $): Promise<string> {
   const override = await $.env.get('HUDDLE_DIR')
-  if (override) return override
   const home = await $.env.get('HOME')
+  // Absolute, so sessions started in different folders share one channel.
+  if (override) return absolute(override, await $.session.cwd(), home ?? '')
   if (!home) throw new Error('huddle: HOME is not set')
   return huddleDir(home)
 }

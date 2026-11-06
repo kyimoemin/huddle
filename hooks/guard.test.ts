@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { absolute, bashRewriteReason, collapse, isInside, relation, splitCommand, type Where } from './guard'
+import { absolute, bashRewriteReason, collapse, expandBraces, isInside, relation, splitCommand, type Where } from './guard'
 
 const WHERE: Where = { dirs: ['/Users/me/.claude/huddle'], cwd: '/Users/me/Projects/app', home: '/Users/me' }
 const INSIDE: Where = { ...WHERE, cwd: '/Users/me/.claude/huddle' }
@@ -66,6 +66,26 @@ describe('Bash commands that rewrite the channel are refused', () => {
     [`ls ~/.claude/huddle/*.md | xargs -I{} chflags nouappnd {}`, WHERE, /xargs chflags/],
     [`sudo -u me rm ~/.claude/huddle/a.md`, WHERE, /rm/],
     [`nice -n 5 rm ${DAY}`, WHERE, /rm/],
+    // Found in the second review.
+    [`rm -rf /[z-a] ~/.claude/huddle`, WHERE, /rm/],
+    [`echo "$(rm -rf ~/.claude/huddle)"`, WHERE, /rm/],
+    [`echo "done: \`chflags nouappnd ${DAY}\`"`, WHERE, /chflags/],
+    [`find ~/.claude/huddle -print0 |& xargs -0 rm`, WHERE, /xargs rm/],
+    [`\\rm -rf ~/.claude/huddle`, WHERE, /rm/],
+    [`rm -rf ~/.claude/hu\\ddle`, WHERE, /rm/],
+    [`find ~/.claude/huddle -exec /bin/rm {} +`, WHERE, /find -exec rm/],
+    [`rm -rf ~/.claude/{huddle,x}`, WHERE, /rm/],
+    [`chflags nouappnd ~/.claude/{skills,hud*}/a.md`, WHERE, /chflags/],
+    [`timeout 5 rm -rf ~/.claude/huddle`, WHERE, /rm/],
+    [`timeout -s KILL 5 rm ${DAY}`, WHERE, /rm/],
+    [`stdbuf -oL rm ${DAY}`, WHERE, /rm/],
+    [`if true; then rm -rf ~/.claude/huddle; fi`, WHERE, /rm/],
+    [`pushd ~/.claude && rm -rf huddle`, WHERE, /rm/],
+    [`cp -R /tmp/huddle ~/.claude/`, WHERE, /cp onto/],
+    [`rsync -a /tmp/huddle ~/.claude`, WHERE, /rsync onto/],
+    [`cp -t ~/.claude/huddle /tmp/fake.md`, WHERE, /cp onto/],
+    [`cp /tmp/fake.md --target-directory=${'~/.claude/huddle'}`, WHERE, /cp onto/],
+    [`echo x >&${DAY}`, WHERE, /redirect/],
   ]
   for (const [command, where, reason] of refused) {
     test(command, () => {
@@ -97,6 +117,13 @@ describe('Bash commands that only read the channel, or leave it alone, are let t
     [`grep -r todo src | xargs rm`, WHERE],
     [`bash -c 'cd /tmp; rm -f scratch.txt'`, WHERE],
     [`git commit -m "fix: rm stale ~/.claude/huddle notes"`, WHERE],
+    [`echo "today: $(date +%F)" > /tmp/stamp`, WHERE],
+    [`cp notes.md ~/`, WHERE],
+    [`cp -R dist ~/.claude/`, WHERE],
+    [`timeout 30 npm test`, WHERE],
+    [`ls ~/.claude/{skills,agents}`, WHERE],
+    [`cmd 2>&1 >&2 | tee /tmp/log`, WHERE],
+    [`if [ -f ${DAY} ]; then cat ${DAY}; fi`, WHERE],
   ]
   for (const [command, where] of allowed) {
     test(command, () => {
@@ -113,6 +140,13 @@ test('splitCommand keeps quoted separators and marks piped commands', () => {
     { text: ' echo "x | y"', isPiped: false },
   ])
   expect(splitCommand('a >| f 2>&1 &> g').map((s) => s.text)).toEqual(['a >| f 2>&1 &> g'])
+})
+
+test('brace expansion lists each word, leaving ${…} alone', () => {
+  expect(expandBraces('~/.claude/{huddle,x}/a')).toEqual(['~/.claude/huddle/a', '~/.claude/x/a'])
+  expect(expandBraces('a{b,c{d,e}}')).toEqual(['ab', 'acd', 'ace'])
+  expect(expandBraces('${HOME}/x')).toEqual(['${HOME}/x'])
+  expect(expandBraces('{solo}')).toEqual(['{solo}'])
 })
 
 test('relation reads globs segment by segment, inside or above the channel', () => {
