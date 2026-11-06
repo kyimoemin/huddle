@@ -1,3 +1,4 @@
+import { modelFamily } from './channel'
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import { POST_TOOL, READ_TOOL, SECTION_TEXT } from './register'
@@ -31,6 +32,7 @@ function engine(
     value:
       e.name === 'HOME' ? '/h' : e.name === 'HUDDLE_DIR' ? huddleDirEnv : e.name === 'CLAUDE_CODE_EXECPATH' ? cli.execPath : undefined,
   }))
+  on('clock.now', () => ({ value: Date.now() }))
   on('session.id', () => ({ value: 'sid' }))
   on('session.cwd', () => ({ value: cli.cwd?.() ?? '/Users/me/Projects/huddle' }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
@@ -496,4 +498,9 @@ test('a post through the tool records whom it mentioned in the status file; a la
     model: 'claude-opus-5-5',
     post: { to: ['coachcard-1e', 'sprint-25'] },
   })
+})
+
+test('/model\'s spelling and the API id reduce to one family', () => {
+  expect(['Opus 5.5', 'claude-opus-5-5', 'claude-opus-5-5[1m]'].map(modelFamily)).toEqual(['opus-5-5', 'opus-5-5', 'opus-5-5'])
+  expect(modelFamily('claude-haiku-4-5-20251001')).toBe('haiku-4-5')
 })

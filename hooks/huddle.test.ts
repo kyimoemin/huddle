@@ -5,6 +5,7 @@ import {
   appendLine,
   compactTokens,
   handle,
+  isMentionable,
   lastContextTokens,
   sessionIcon,
   transcriptFile,
@@ -249,4 +250,10 @@ test('token counts are compact', () => {
   expect(compactTokens(114_247)).toBe('114k')
   expect(compactTokens(1_000_000)).toBe('1M')
   expect(compactTokens(1_250_000)).toBe('1.3M')
+})
+
+test('a name a mention cannot spell is not mentionable', () => {
+  expect(['sprint 25', 'huddle-5a', 'a.b'].map(isMentionable)).toEqual([true, true, true])
+  expect(['café', '_x', 'foo (2)', 'end-'].map(isMentionable)).toEqual([false, false, false, false])
+  expect(addMention('hi', 'café')).toBe('hi')
 })

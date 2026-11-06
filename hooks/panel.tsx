@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { On, Timer } from 'claude-code'
 import type { Feed, Peer } from '../types'
-import { PERSON_ICON, addMention, compactTokens, dayFile, handle, localDay, sessionIcon, tailFile } from './huddle'
+import { PERSON_ICON, addMention, isMentionable, compactTokens, dayFile, handle, localDay, sessionIcon, tailFile } from './huddle'
 import { type $, channelDir, deliverMentions, errorText, forgetSessions, peerStatuses, post, runClaude, runner, sessions } from './channel'
 
 export const PANE = 'huddle'
@@ -49,13 +49,16 @@ export const TALK_MS = 10 * 60_000
  */
 export async function refreshPeers($: $): Promise<void> {
   let rows: Peer[]
+  const now = await $.clock.now()
   try {
     const listed = await sessions($)
     // The list stands without the figures.
     const status = await peerStatuses($, listed).catch(() => new Map<string, never>())
     rows = sortPeers(
       listed.map(({ sessionId, name, kind, status: state, id, startedAt, cwd }) => {
-        const { context, post } = status.get(sessionId) ?? {}
+        const { context, post: last } = status.get(sessionId) ?? {}
+        // Dropped once old, so the row's arrow goes with the next poll.
+        const post = last && now - last.at < TALK_MS ? last : undefined
         const project = cwd?.split('/').filter(Boolean).at(-1)
         return {
           sessionId,
@@ -74,8 +77,15 @@ export async function refreshPeers($: $): Promise<void> {
     return
   }
   const current = await read($, peers)
-  if (JSON.stringify(current) !== JSON.stringify(rows)) await update($, peers, () => rows)
+  // Rewritten when a row changed, and every half minute so the ages move.
+  if (JSON.stringify(current) !== JSON.stringify(rows) || now - lastPeersWrite >= AGES_MS) {
+    lastPeersWrite = now
+    await update($, peers, () => rows)
+  }
 }
+
+const AGES_MS = 30_000
+let lastPeersWrite = 0
 
 /** Five cells filled to `percent`: `▰▰▱▱▱`. */
 export function bar(percent: number): string {
@@ -88,15 +98,21 @@ const mentions = (to: readonly string[], name: string) =>
   to.some((tag) => tag.toLowerCase() === name.toLowerCase() || tag.toLowerCase() === handle(name).toLowerCase())
 
 /**
- * Who each session is talking with: the names its last post (within
- * TALK_MS) mentioned, and the sessions whose last post mentioned it.
+ * Who each session is talking with: the sessions (and `you`) its last post
+ * (within TALK_MS) mentioned, and the sessions whose last post mentioned it.
+ * A name no other listed session has reached nobody, so it is left out.
  */
 export function conversations(everyone: readonly Peer[], now: number): Map<string, { to: string[]; from: string[] }> {
   const recent = everyone.filter((peer) => peer.post && now - peer.post.at < TALK_MS)
   const out = new Map<string, { to: string[]; from: string[] }>()
   for (const peer of everyone) {
-    const to = recent.includes(peer) ? peer.post!.to : []
-    const from = recent.filter((other) => other !== peer && mentions(other.post!.to, peer.name)).map((other) => other.name)
+    const others = everyone.filter((other) => other.sessionId !== peer.sessionId)
+    const to = recent.includes(peer)
+      ? peer.post!.to.filter((tag) => tag.toLowerCase() === 'you' || others.some((other) => mentions([tag], other.name)))
+      : []
+    const from = [
+      ...new Set(recent.filter((other) => other !== peer && mentions(other.post!.to, peer.name)).map((other) => other.name)),
+    ]
     if (to.length > 0 || from.length > 0) out.set(peer.sessionId, { to, from })
   }
   return out
@@ -261,7 +277,7 @@ export function registerPanel(on: On): void {
     const everyone = await read($, peers)
     const isListOpen = await read($, showPeers)
     const selfId = await $.session.id()
-    const now = Date.now()
+    const now = await $.clock.now()
 
     const bodyRows = e.props.scroll.bodyRows
     // The list takes at most half the pane; the rest is the feed's.
@@ -298,7 +314,11 @@ export function registerPanel(on: On): void {
                 key={`mention-${peer.sessionId}`}
                 plain
                 label={`${sessionIcon(peer.sessionId)} ${peer.name}`}
-                onPress={() => void update($, draft, (typed) => addMention(typed, peer.name))}
+                onPress={() =>
+                  void (isMentionable(peer.name)
+                    ? update($, draft, (typed) => addMention(typed, peer.name))
+                    : update($, notice, () => `${peer.name} can't be @mentioned: a mention is letters, digits, . _ and -`))
+                }
               />
               <Text dimColor wrap="truncate">
                 {[isSelf ? 'this session' : '', peer.project ?? '', peer.kind === 'background' ? 'bg' : '']
@@ -335,16 +355,16 @@ export function registerPanel(on: On): void {
         {hidden > 0 && <Text dimColor>+{hidden} more</Text>}
         <Box flexDirection="column" flexGrow={1}>
           {shown.length === 0 && <Text dimColor>No posts today. Write one below; click a session to mention it.</Text>}
-          {shown.map((line) => {
+          {shown.map((line, i) => {
             const row = parseRow(line)
             return 'raw' in row ? (
-              <Text wrap="wrap">{row.raw}</Text>
+              <Text key={`line-${i}`} wrap="wrap">{row.raw}</Text>
             ) : (
-              <Text wrap="wrap">
+              <Text key={`line-${i}`} wrap="wrap">
                 <Text dimColor>{row.time}</Text> <Text bold>{[authorIcon(row.name, everyone), row.name].filter(Boolean).join(' ')}</Text>{' '}
-                {splitMentions(row.body).map((part) =>
+                {splitMentions(row.body).map((part, j) =>
                   part.isMention ? (
-                    <Text color="suggestion" bold>
+                    <Text key={`m-${j}`} color="suggestion" bold>
                       {part.text}
                     </Text>
                   ) : (

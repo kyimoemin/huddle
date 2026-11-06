@@ -228,8 +228,17 @@ export function handle(name: string): string {
   return name.trim().replace(/\s+/g, '-')
 }
 
-/** `@handle ` added to a draft: after a space, and not again when the draft has it. */
+/** Whether a post can mention the name: its handle reads back whole as a mention. */
+export function isMentionable(name: string): boolean {
+  return parseMentions(`@${handle(name)}`)[0] === handle(name)
+}
+
+/**
+ * `@handle ` added to a draft: after a space, and not again when the draft
+ * has it. Unchanged for a name no mention can spell (`café`, `_x`).
+ */
 export function addMention(draft: string, name: string): string {
+  if (!isMentionable(name)) return draft
   const tag = `@${handle(name)}`
   if (parseMentions(draft).some((seen) => seen.toLowerCase() === tag.slice(1).toLowerCase())) return draft
   return `${draft}${draft === '' || /\s$/.test(draft) ? '' : ' '}${tag} `

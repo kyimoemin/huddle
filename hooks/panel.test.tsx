@@ -33,7 +33,7 @@ const PANE = (surface: (typeof SURFACES)[number]) =>
  * `day.mtimeMs` (0: no file). The pane is open once `ui.open` ran, until
  * `world.isOpen` is set false. Returns what the test reads and changes.
  */
-function world(on: On) {
+function world(on: On, hasMockClock = false) {
   const state = {
     lines: [] as string[],
     mtimeMs: 0,
@@ -58,6 +58,8 @@ function world(on: On) {
       { sessionId: 'bg-full', id: 'bg1', name: 'nightly-qa', kind: 'background', status: 'busy', startedAt: 500 },
     ] as Record<string, unknown>[],
   }
+  // Tests that move time install mock.clock first; the rest read the wall clock.
+  if (!hasMockClock) on('clock.now', () => ({ value: Date.now() }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__huddle__${e.name}` } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
@@ -216,7 +218,7 @@ test('an unknown mention shows under the feed; an empty post does nothing', asyn
 
 test('the feed follows the file every 2 s while the pane is open, then stops', async ($, on) => {
   const clock = mock.clock(on)
-  const day = world(on)
+  const day = world(on, true)
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
@@ -343,7 +345,7 @@ test("mentioning this session from its own panel prompts it instead of dropping 
 
 test("each session's row shows its context fill; a session without huddle shows none", async ($, on) => {
   const clock = mock.clock(on)
-  const day = world(on)
+  const day = world(on, true)
   day.context = {
     sid: { mtimeMs: 1, text: JSON.stringify({ percent: 42, at: 1 }) },
     'bg-full': { mtimeMs: 1, text: JSON.stringify({ percent: 91, at: 1 }) },
@@ -397,12 +399,12 @@ test('the session list still shows when the context files cannot be read', async
   await ui.unmount()
 })
 
-const reply = (tokens: number, model = 'opus') =>
+const reply = (tokens: number, model = 'claude-opus-5-5') =>
   JSON.stringify({ type: 'assistant', message: { model, usage: { input_tokens: tokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })
 
 test("a session without huddle has its context read off its transcript, as a % where a huddle session on its model gives the window", async ($, on) => {
   const clock = mock.clock(on)
-  const day = world(on)
+  const day = world(on, true)
   day.peers = [
     { sessionId: 'sid', name: 'huddle-5a', kind: 'interactive', status: 'busy', startedAt: 1000, cwd: '/Users/me/Projects/huddle' },
     { sessionId: 's1', name: 'coachcard-1e', kind: 'interactive', status: 'idle', startedAt: 2000, cwd: '/Users/me/coach.card' },
@@ -410,9 +412,10 @@ test("a session without huddle has its context read off its transcript, as a % w
   ]
   day.peers.push({ sessionId: 's3', name: 'small', kind: 'interactive', status: 'idle', startedAt: 4000 })
   day.context = {
-    sid: { mtimeMs: 1, text: JSON.stringify({ percent: 11, window: 1_000_000, model: 'opus', at: 1 }) },
+    // `/model`'s spelling; the transcripts carry the API id.
+    sid: { mtimeMs: 1, text: JSON.stringify({ percent: 11, window: 1_000_000, model: 'Opus 5.5', at: 1 }) },
     // The same model at a smaller window: estimates use it, and a transcript past it shows tokens.
-    s3: { mtimeMs: 1, text: JSON.stringify({ percent: 50, window: 500_000, model: 'opus', at: 1 }) },
+    s3: { mtimeMs: 1, text: JSON.stringify({ percent: 50, window: 500_000, model: 'claude-opus-5-5[1m]', at: 1 }) },
   }
   day.transcripts = {
     '/h/.claude/projects/-Users-me-coach-card/s1.jsonl': { mtimeMs: 1, text: `{"cut\n${reply(250_000)}\n` },
@@ -427,12 +430,14 @@ test("a session without huddle has its context read off its transcript, as a % w
   expect(await ui.find({ type: 'Text', text: '~114k tokens' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /coach\.card/ })).toBeDefined()
 
-  // A transcript is tailed again only once it changed.
+  // A transcript is tailed again only once it changed, and at most every 10 s.
   const tails = day.tails
   await clock.advance(2000)
   expect(day.tails).toBe(tails)
   day.transcripts['/h/.claude/projects/-Users-me-coach-card/s1.jsonl'] = { mtimeMs: 2, text: `${reply(600_000)}\n` }
   await clock.advance(2000)
+  expect(day.tails).toBe(tails)
+  await clock.advance(8000)
   expect(day.tails).toBe(tails + 1)
   expect(await ui.find({ type: 'Text', text: '~600k tokens' })).toBeDefined()
   await ui.unmount()
@@ -461,11 +466,21 @@ test('a post older than ten minutes is no longer talking', () => {
     ['a', { to: [], from: ['b'] }],
     ['b', { to: ['Sprint-25'], from: [] }],
   ])
+  // Unknown names and itself reached nobody; `you` is the person; two posters of one name show once.
+  const more = [
+    { sessionId: 'w1', name: 'worker', post: { at: now, to: ['ghost', 'worker', 'you', 'lead'] } },
+    { sessionId: 'w2', name: 'worker', post: { at: now, to: ['lead'] } },
+    { sessionId: 'l', name: 'lead' },
+  ]
+  const talks = conversations(more, now)
+  expect(talks.get('w1')?.to).toEqual(['worker', 'you', 'lead'])
+  expect(talks.get('l')?.from).toEqual(['worker'])
 })
 
 test('clicking a session puts its @handle in the post box, once', async ($, on) => {
   const day = world(on)
   day.peers.push({ sessionId: 's9', name: 'sprint 25', kind: 'interactive', status: 'idle' })
+  day.peers.push({ sessionId: 's10', name: 'café', kind: 'interactive', status: 'idle' })
   await $.session.start(START)
   await $.command.run(HUDDLE)
 
@@ -476,6 +491,10 @@ test('clicking a session puts its @handle in the post box, once', async ($, on) 
     await ui.press({ key: 'mention-s9' })
     await ui.press({ key: 'mention-s1' })
     expect((await ui.find({ key: 'post' }))?.props.value).toBe('hey @coachcard-1e @sprint-25 ')
+    // A name no mention can spell says so instead.
+    await ui.press({ key: 'mention-s10' })
+    expect((await ui.find({ key: 'post' }))?.props.value).toBe('hey @coachcard-1e @sprint-25 ')
+    expect(await ui.find({ type: 'Text', text: /café can't be @mentioned/ })).toBeDefined()
     await ui.input({ key: 'post', text: '', kind: 'change' })
     await ui.unmount()
   }
@@ -503,4 +522,18 @@ test('splitMentions and bar', () => {
     { text: '.) mail x@y.z' },
   ])
   expect([bar(0), bar(9), bar(10), bar(50), bar(100)]).toEqual(['▱▱▱▱▱', '▱▱▱▱▱', '▰▱▱▱▱', '▰▰▰▱▱', '▰▰▰▰▰'])
+})
+
+test('the talking arrow goes once the post is ten minutes old, with no other change', async ($, on) => {
+  const clock = mock.clock(on)
+  const day = world(on, true)
+  day.context = { sid: { mtimeMs: 1, text: JSON.stringify({ percent: 5, post: { at: clock.now(), to: ['coachcard-1e'] }, at: 1 }) } }
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  expect(await ui.find({ type: 'Text', text: '→ @coachcard-1e' })).toBeDefined()
+  await clock.advance(10 * 60_000 + 2000)
+  expect(await ui.find({ type: 'Text', text: '→ @coachcard-1e' })).toBeUndefined()
+  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 3 · 2 busy')
+  await ui.unmount()
 })

@@ -125,7 +125,8 @@ export const register: Register = (on) => {
       const line = await post($, author, text)
       const mentions = await deliverMentions($, author, text, line)
       // Every panel shows who this session last talked to.
-      await publishStatus($, { post: { at: Date.now(), to: parseMentions(text) } }).catch(() => {})
+      // Best effort: the post is saved whatever this does.
+      await (async () => publishStatus($, { post: { at: await $.clock.now(), to: parseMentions(text) } }))().catch(() => {})
       return { result: `Posted to #huddle: ${line}${mentions ? `\nMentions: ${mentions}` : ''}` }
     } catch (error) {
       return { deny: `huddle: the post was not saved: ${errorText(error)}` }

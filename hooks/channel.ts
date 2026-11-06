@@ -239,7 +239,17 @@ export type Status = {
 let own: { id: string; status: Status } | undefined
 
 /** Merges `patch` into this session's status file. */
-export async function publishStatus($: $, patch: Omit<Partial<Status>, 'at'>): Promise<void> {
+export function publishStatus($: $, patch: Omit<Partial<Status>, 'at'>): Promise<void> {
+  // One at a time: a turn's figure and a post can land together, and each
+  // write must carry the other's fields and land in order.
+  const run = writing.then(() => writeStatus($, patch))
+  writing = run.catch(() => {})
+  return run
+}
+
+let writing: Promise<void> = Promise.resolve()
+
+async function writeStatus($: $, patch: Omit<Partial<Status>, 'at'>): Promise<void> {
   const id = await $.session.id()
   if (!isFileSafe(id)) return
   const file = `${await contextDir($)}/${id}.json`
@@ -290,7 +300,8 @@ export type PeerStatus = {
 }
 
 const statuses = new Map<string, { mtimeMs: number; status: Status }>()
-const transcripts = new Map<string, { mtimeMs: number; tokens?: number; model?: string }>()
+const transcripts = new Map<string, { mtimeMs: number; readAt: number; tokens?: number; model?: string }>()
+const TRANSCRIPT_REREAD_MS = 10_000
 /** How often, and past what age, the files of sessions no longer running are removed. */
 const SWEEP_MS = 60 * 60_000
 const STALE_MS = 24 * 60 * 60_000
@@ -372,11 +383,11 @@ export async function peerStatuses($: $, rows: readonly SessionRow[]): Promise<M
   const windows = new Map<string, number>()
   // One model id can run with different windows: the smallest known one never shows a session emptier than it is.
   for (const { model, window } of published.values()) {
-    if (model && window) windows.set(model, Math.min(window, windows.get(model) ?? Infinity))
+    if (model && window) windows.set(modelFamily(model), Math.min(window, windows.get(modelFamily(model)) ?? Infinity))
   }
 
   const configDir = await transcriptsRoot($)
-  for (const row of rows) {
+  await Promise.all(rows.map(async (row) => {
     const status = published.get(row.sessionId)
     const peer: PeerStatus = {}
     if (status?.post) peer.post = status.post
@@ -385,14 +396,28 @@ export async function peerStatuses($: $, rows: readonly SessionRow[]): Promise<M
     } else if (row.cwd && configDir && isFileSafe(row.sessionId)) {
       const read = await transcriptTokens($, transcriptFile(configDir, row.cwd, row.sessionId), row.sessionId)
       if (read?.tokens !== undefined) {
-        const window = read.model ? windows.get(read.model) : undefined
+        const window = read.model ? windows.get(modelFamily(read.model)) : undefined
         const percent = window && read.tokens <= window ? clampPercent((read.tokens / window) * 100) : undefined
         peer.context = { ...(percent !== undefined ? { percent } : {}), tokens: read.tokens, estimated: true }
       }
     }
     if (peer.context || peer.post) out.set(row.sessionId, peer)
-  }
+  }))
   return out
+}
+
+/**
+ * A model as both spellings reduce to: `/model`'s (`Opus 5.5`,
+ * `claude-opus-5-5[1m]`) and a transcript's API id (`claude-opus-5-5`,
+ * `claude-haiku-4-5-20251001`) both become `opus-5-5` / `haiku-4-5`.
+ */
+export function modelFamily(model: string): string {
+  return model
+    .toLowerCase()
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-*(claude-)?|-*$/g, '')
+    .replace(/-\d{8}$/, '')
 }
 
 /** Where transcripts live: `$CLAUDE_CONFIG_DIR`, else ~/.claude. */
@@ -412,12 +437,14 @@ async function transcriptTokens($: $, file: string, id: string): Promise<{ token
     return undefined
   }
   const known = transcripts.get(id)
-  if (known?.mtimeMs === mtimeMs) return known
+  // A busy session's transcript moves every tick: read it at most every 10s.
+  const now = await $.clock.now()
+  if (known && (known.mtimeMs === mtimeMs || now - known.readAt < TRANSCRIPT_REREAD_MS)) return known
   try {
     const { exitCode, stdout } = await $.process.run(['/usr/bin/tail', '-c', String(TRANSCRIPT_TAIL_BYTES), file], { timeoutMs: 3000 })
     if (exitCode !== 0) return known
     const last = lastContextTokens(stdout)
-    const read = { mtimeMs, ...(last ?? {}) }
+    const read = { mtimeMs, readAt: now, ...(last ?? {}) }
     transcripts.set(id, read)
     return read
   } catch {
