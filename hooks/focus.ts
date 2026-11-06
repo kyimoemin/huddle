@@ -22,6 +22,11 @@ export type Host = {
   tty?: string
 }
 
+/** The terminal apps whose tabs can be picked by their device. */
+const TERMINALS: Record<string, string> = { 'Terminal.app': 'Terminal', 'iTerm.app': 'iTerm2' }
+
+const appName = (app: string) => app.split('/').at(-1)!
+
 /**
  * The app a process runs under: the bundle of its nearest ancestor that is an
  * app, cut at the first `.app` so a helper (`Code Helper (Plugin).app` inside
@@ -30,19 +35,18 @@ export type Host = {
 export function hostOf(procs: ReadonlyMap<number, Proc>, pid: number): Host {
   const own = procs.get(pid)
   const tty = own && own.tty !== '??' && own.tty !== '-' ? `/dev/${own.tty.replace(/^\/dev\//, '')}` : undefined
+  // The session's own binary may sit in an app bundle too: start at its parent.
+  const apps: string[] = []
   const seen = new Set<number>()
-  for (let proc = own; proc && !seen.has(proc.pid) && proc.pid > 1; proc = procs.get(proc.ppid)) {
+  for (let proc = own && procs.get(own.ppid); proc && !seen.has(proc.pid) && proc.pid > 1; proc = procs.get(proc.ppid)) {
     seen.add(proc.pid)
     const at = proc.command.indexOf('.app/')
-    if (at >= 0) return { app: proc.command.slice(0, at + 4), ...(tty ? { tty } : {}) }
+    if (at >= 0) apps.push(proc.command.slice(0, at + 4))
   }
-  return tty ? { tty } : {}
+  // With a terminal, the terminal app it runs in wins over any app nearer it.
+  const app = (tty && apps.find((path) => TERMINALS[appName(path)])) ?? apps[0]
+  return { ...(app ? { app } : {}), ...(tty ? { tty } : {}) }
 }
-
-/** The terminal apps whose tabs can be picked by their device. */
-const TERMINALS: Record<string, string> = { 'Terminal.app': 'Terminal', 'iTerm.app': 'iTerm2' }
-
-const appName = (app: string) => app.split('/').at(-1)!
 
 /**
  * The AppleScript that brings forward the tab holding `tty` in a terminal app,
@@ -84,8 +88,8 @@ end tell`
 
 /**
  * How to bring a session's window forward: the command to run, or why there
- * is none. An editor (an app with a `code` command in its bundle, as VS Code
- * and its forks have) is asked to open the session's folder, which raises the
+ * is none. An editor (an app with a command-line folder in its bundle, as
+ * VS Code and its forks have) is asked to open the session's folder, which raises the
  * window that has it open; a terminal app has its tab picked; any other app
  * (the desktop app) is brought to the front.
  */
@@ -107,7 +111,7 @@ export async function focusPeer($: $, peer: Peer): Promise<string | undefined> {
     const ps = await $.process.run(['/bin/ps', '-axo', 'pid=,ppid=,tty=,comm='], { timeoutMs: 5000 })
     if (ps.exitCode !== 0) return `${peer.name}'s window can't be found: ps failed`
     const host = hostOf(parsePs(ps.stdout), peer.pid)
-    const isEditor = host.app ? await $.fs.stat(`${host.app}/Contents/Resources/app/bin/code`).then(() => true, () => false) : false
+    const isEditor = host.app ? await $.fs.stat(`${host.app}/Contents/Resources/app/bin`).then(() => true, () => false) : false
     const command = focusCommand(host, peer.cwd, isEditor)
     if (!Array.isArray(command)) return `${peer.name}'s window can't be found: ${command.reason}`
     const ran = await $.process.run(command, { timeoutMs: 10_000 })

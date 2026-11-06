@@ -221,6 +221,9 @@ function ensurePolling($: $): void {
 async function openPane($: $): Promise<boolean> {
   await refresh($, true)
   await refreshPeers($)
+  // The box draws `draft`; bring back what was typed before the pane closed.
+  const typed = await read($, typing)
+  await update($, draft, () => typed)
   const { isPlaced } = await $.ui.open({ id: PANE, title: TITLE })
   ensurePolling($)
   return isPlaced
@@ -242,14 +245,25 @@ export function postRowsFor(text: string, columns: number): number {
  * keystroke late, which drops the newest character and moves the cursor.
  * Only a change in the box's height redraws.
  */
-async function noteTyping($: $, text: string): Promise<void> {
-  await update($, typing, () => text)
-  const rows = postRowsFor(text, paneColumns)
-  if (rows !== (await read($, postRows))) await update($, postRows, () => rows)
+function noteTyping($: $, text: string): Promise<void> {
+  // One at a time, so a slow earlier keystroke can't land after a later one.
+  typingQueue = typingQueue
+    .then(async () => {
+      await update($, typing, () => text)
+      const rows = postRowsFor(text, paneColumns)
+      if (rows !== (await read($, postRows))) await update($, postRows, () => rows)
+    })
+    .catch(() => {})
+  return typingQueue
 }
+let typingQueue: Promise<void> = Promise.resolve()
 
 /** Puts `text` in the post box, replacing what the person typed. */
 async function setPostBox($: $, text: string): Promise<void> {
+  // The field takes a value only when it differs from the last one drawn: when
+  // the person edited away from that text, draw what they have first.
+  const typed = await read($, typing)
+  if (text === (await read($, draft)) && typed !== text) await update($, draft, () => typed)
   await update($, draft, () => text)
   await noteTyping($, text)
 }
@@ -365,7 +379,9 @@ export function registerPanel(on: On): void {
                 plain
                 label={sessionIcon(peer.sessionId)}
                 onPress={() =>
-                  void focusPeer($, peer).then((problem) => update($, notice, () => problem ?? ''))
+                  void focusPeer($, peer)
+                    .then((problem) => (problem ? update($, notice, () => problem) : undefined))
+                    .catch(() => {})
                 }
               />
               <Button

@@ -88,7 +88,7 @@ function world(on: On, hasMockClock = false) {
     return { value: undefined }
   })
   on('fs.stat', (_, e) => {
-    if (state.editors.some((app) => e.path === `${app}/Contents/Resources/app/bin/code`)) {
+    if (state.editors.some((app) => e.path === `${app}/Contents/Resources/app/bin`)) {
       return { value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false } }
     }
     const transcript = state.transcripts[e.path]
@@ -204,7 +204,10 @@ test('/huddle-panel opens the pane too, and both commands are registered', async
 test("a session's icon brings its window forward; a background one says it has none", async ($, on) => {
   const day = world(on)
   day.peers[1] = { ...day.peers[1]!, pid: 520, cwd: '/p/coachcard' } as (typeof day.peers)[number]
-  day.ps = '  520   510 ??  /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)\n'
+  day.ps = [
+    '  510   500 ??  /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)',
+    '  520   510 ??  /Users/me/.vscode/extensions/anthropic.claude-code/resources/native-binary/claude',
+  ].join('\n')
   day.editors = ['/Applications/Visual Studio Code.app']
   await $.session.start(START)
   await $.command.run(HUDDLE)

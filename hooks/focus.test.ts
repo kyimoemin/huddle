@@ -20,6 +20,9 @@ test('a session runs under the app around its nearest app ancestor, helpers incl
   expect(hostOf(procs, 520)).toEqual({ app: '/Applications/Visual Studio Code.app' })
   expect(hostOf(procs, 630)).toEqual({ app: '/System/Applications/Utilities/Terminal.app', tty: '/dev/ttys003' })
   expect(hostOf(procs, 810)).toEqual({})
+  // Its own binary in a bundle, run from Terminal: Terminal is the host.
+  const bundled = parsePs(`${PS}  900   620 ttys003  /Applications/Claude.app/Contents/Resources/claude\n`)
+  expect(hostOf(bundled, 900)).toEqual({ app: '/System/Applications/Utilities/Terminal.app', tty: '/dev/ttys003' })
   expect(hostOf(procs, 999)).toEqual({})
 })
 
