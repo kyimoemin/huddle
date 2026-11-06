@@ -7,7 +7,6 @@ import {
   completeMention,
   conversations,
   fitGroups,
-  fitLines,
   groupPosts,
   groupTime,
   initials,
@@ -182,15 +181,6 @@ test('a feed line splits into time, name and text', () => {
     body: 'QA is **green**',
   })
   expect(parseRow('something else')).toEqual({ raw: 'something else' })
-})
-
-test('fitLines keeps the newest lines that fit, counting wrapped rows', () => {
-  const lines = ['a'.repeat(25), 'b', 'c'.repeat(10)]
-  expect(fitLines(lines, 2, 10)).toEqual(['b', 'c'.repeat(10)])
-  expect(fitLines(lines, 5, 10)).toEqual(lines)
-  // The newest line shows even when it alone is taller than the room.
-  expect(fitLines(['x'.repeat(100)], 2, 10)).toEqual(['x'.repeat(100)])
-  expect(fitLines([], 5, 10)).toEqual([])
 })
 
 test("/huddle opens the pane showing today's posts, on every surface", async ($, on) => {

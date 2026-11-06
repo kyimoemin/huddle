@@ -342,9 +342,6 @@ export function postLayout(prefix: string, body: string, columns: number, isOpen
   return { body: `${[...body].slice(0, room).join('')}…`, isLong: true, rows: COLLAPSED_ROWS + 1 }
 }
 
-/** What a post's time and author take before its body. */
-const postPrefix = (time: string, author: string) => `${time} ${author} `
-
 /** An author's colour, fixed by name. */
 export function authorColor(name: string): string {
   let hash = 0
@@ -374,28 +371,6 @@ type Row = { time: string; name: string; body: string } | { raw: string }
 export function parseRow(line: string): Row {
   const match = /^- (\d\d:\d\d) \*\*(.+?)\*\*: (.*)$/.exec(line)
   return match ? { time: match[1]!, name: match[2]!, body: match[3]! } : { raw: line }
-}
-
-/**
- * The newest lines that fit `rows` rows `columns` wide, oldest first; each
- * line counts the rows it wraps to.
- */
-export function fitLines(
-  lines: readonly string[],
-  rows: number,
-  columns: number,
-  rowsOf: (line: string) => number = (line) => Math.max(1, Math.ceil([...line].length / Math.max(1, columns))),
-): string[] {
-  const kept: string[] = []
-  let used = 0
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i]!
-    const cost = rowsOf(line)
-    if (used + cost > rows && kept.length > 0) break
-    kept.unshift(line)
-    used += cost
-  }
-  return kept
 }
 
 /** One post of a group: its feed line (what `expanded` keys it by), time and text. */
