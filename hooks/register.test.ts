@@ -1,0 +1,250 @@
+import { expect, test } from 'claude-code/testing'
+import type { On } from 'claude-code'
+import { POST_TOOL, READ_TOOL, SECTION_TEXT } from './register.tsx'
+
+const WHOLE = { isStdoutTruncated: false, isStderrTruncated: false }
+type Answer = { exitCode: number; stdout?: string; stderr?: string }
+
+/**
+ * Stands in for the engine beneath the mod: HOME is /h, this session's id is
+ * `sid`, `claude agents --json` names it `huddle-5a`, and every other command
+ * is answered by `answer`. Returns the argv of each command run.
+ */
+function engine(
+  on: On,
+  answer: (argv: readonly string[]) => Answer = () => ({ exitCode: 0 }),
+  huddleDirEnv?: string,
+) {
+  const runs: (readonly string[])[] = []
+  const registered: string[] = []
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('tool.register', (_, e) => {
+    registered.push(e.name)
+    return { value: { tool: `mcp__huddle__${e.name}` } }
+  })
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : e.name === 'HUDDLE_DIR' ? huddleDirEnv : undefined }))
+  on('session.id', () => ({ value: 'sid' }))
+  on('session.cwd', () => ({ value: '/Users/me/Projects/huddle' }))
+  on('process.run', (_, e) => {
+    runs.push(e.argv)
+    if (e.argv[0] === 'claude') {
+      const rows = [
+        { sessionId: 'other', name: 'coachcard-1e' },
+        { sessionId: 'sid', name: 'huddle-5a' },
+      ]
+      return { value: { exitCode: 0, stdout: JSON.stringify(rows), stderr: '', ...WHOLE } }
+    }
+    const { exitCode, stdout = '', stderr = '' } = answer(e.argv)
+    return { value: { exitCode, stdout, stderr, ...WHOLE } }
+  })
+  return { runs, registered }
+}
+
+const START = { cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true } as const
+
+test('session start registers post and read', async ($, on) => {
+  const { registered } = engine(on)
+  await $.session.start(START)
+  expect(registered).toEqual(['post', 'read'])
+})
+
+test("post appends one entry, signed with this session's name, to today's file", async ($, on) => {
+  const { runs } = engine(on)
+  await $.session.start(START)
+
+  const done = await $.tool.call({ tool: POST_TOOL, text: 'finished QA\nall green' })
+
+  expect(done.deny).toBeUndefined()
+  const append = runs.find((argv) => argv[0] === '/bin/sh')!
+  const [, , , , line, file, dir] = append
+  expect(line).toMatch(/^- \d\d:\d\d \*\*huddle-5a\*\*: finished QA \/ all green$/)
+  expect(file).toMatch(/^\/h\/\.claude\/huddle\/\d{4}-\d\d-\d\d\.md$/)
+  expect(dir).toBe('/h/.claude/huddle')
+  expect(String(done.result)).toContain('Posted to #huddle')
+})
+
+test('HUDDLE_DIR moves the channel', async ($, on) => {
+  const { runs } = engine(on, undefined, '/tmp/chan')
+  await $.session.start(START)
+
+  await $.tool.call({ tool: POST_TOOL, text: 'hi' })
+
+  const [, , , , , file, dir] = runs.find((argv) => argv[0] === '/bin/sh')!
+  expect(file).toMatch(/^\/tmp\/chan\/\d{4}-\d\d-\d\d\.md$/)
+  expect(dir).toBe('/tmp/chan')
+})
+
+test('post refuses empty text without writing', async ($, on) => {
+  const { runs } = engine(on)
+  await $.session.start(START)
+
+  const done = await $.tool.call({ tool: POST_TOOL, text: '   ' })
+
+  expect(done.deny).toContain('non-empty')
+  expect(runs.some((argv) => argv[0] === '/bin/sh')).toBe(false)
+})
+
+test('a failed append comes back as an error naming the cause', async ($, on) => {
+  engine(on, () => ({ exitCode: 1, stderr: 'Operation not permitted' }))
+  await $.session.start(START)
+
+  const done = await $.tool.call({ tool: POST_TOOL, text: 'hi' })
+
+  expect(done.deny).toContain('Operation not permitted')
+})
+
+test("read returns today's tail, and says so when there is nothing", async ($, on) => {
+  const { runs } = engine(on, (argv) =>
+    argv[0] === '/usr/bin/tail' ? { exitCode: 0, stdout: '- 14:32 **a**: one\n- 14:35 **you**: two\n' } : { exitCode: 0 },
+  )
+  await $.session.start(START)
+
+  const done = await $.tool.call({ tool: READ_TOOL, tail: 9999 })
+
+  expect(done.result).toBe('- 14:32 **a**: one\n- 14:35 **you**: two')
+  const tail = runs.find((argv) => argv[0] === '/usr/bin/tail')!
+  expect(tail.slice(0, 3)).toEqual(['/usr/bin/tail', '-n', '200'])
+})
+
+test('read with days 2 heads each day that has posts', async ($, on) => {
+  engine(on, (argv) =>
+    argv.at(-1)!.endsWith('.md') && argv[0] === '/usr/bin/tail'
+      ? { exitCode: 0, stdout: `- 09:00 **x**: from ${argv.at(-1)!.slice(-13, -3)}\n` }
+      : { exitCode: 0 },
+  )
+  await $.session.start(START)
+
+  const text = String((await $.tool.call({ tool: READ_TOOL, days: 2 })).result)
+  const lines = text.split('\n')
+
+  expect(lines.length).toBe(4)
+  expect(lines[0]).toMatch(/^## \d{4}-\d\d-\d\d$/)
+  expect(lines[2]).toMatch(/^## \d{4}-\d\d-\d\d$/)
+  expect(lines[1]).toContain(lines[0]!.slice(3))
+})
+
+test('read with days 2 still heads a day that has no posts', async ($, on) => {
+  // Only today's file exists.
+  engine(on, (argv) =>
+    argv[0] === '/usr/bin/tail' && argv.at(-1)!.endsWith(`${today()}.md`)
+      ? { exitCode: 0, stdout: '- 09:00 **x**: today\n' }
+      : { exitCode: 1 },
+  )
+  await $.session.start(START)
+
+  const lines = String((await $.tool.call({ tool: READ_TOOL, days: 2 })).result).split('\n')
+
+  expect(lines).toEqual([lines[0], '(no posts)', `## ${today()}`, '- 09:00 **x**: today'])
+  expect(lines[0]).toMatch(/^## \d{4}-\d\d-\d\d$/)
+})
+
+function today() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+test('read of an empty channel says there are no posts', async ($, on) => {
+  engine(on, () => ({ exitCode: 1, stderr: 'No such file or directory' }))
+  await $.session.start(START)
+
+  expect((await $.tool.call({ tool: READ_TOOL })).result).toBe('No posts today.')
+  expect((await $.tool.call({ tool: READ_TOOL, days: 2 })).result).toBe('No posts today or yesterday.')
+})
+
+test('the system prompt gains the huddle section last, but not under --bare', async ($, on) => {
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'hi', scope: 'shared' }] }))
+
+  const base = { model: 'm', promptModel: 'm', surfaces: [], tools: [], outputStyle: null }
+  const full = await $.prompt.compose({ ...base, traits: [] })
+  expect(full.sections.map((s) => s.id)).toEqual(['intro', 'huddle:channel'])
+  expect(full.sections[1]).toEqual({ id: 'huddle:channel', text: SECTION_TEXT, scope: 'session' })
+
+  const bare = await $.prompt.compose({ ...base, traits: ['bare'] })
+  expect(bare.sections.map((s) => s.id)).toEqual(['intro'])
+})
+
+/**
+ * The file system beneath the guard: `/h` is really `/private/h`, and
+ * `/links/chan` is a link to the channel. Every other path is missing.
+ */
+function files(on: On) {
+  on('fs.stat', (_, e) => {
+    const real = e.path.startsWith('/h/')
+      ? `/private${e.path}`
+      : e.path.startsWith('/links/chan')
+        ? `/private/h/.claude/huddle${e.path.slice('/links/chan'.length)}`
+        : undefined
+    if (real === undefined || e.path.endsWith('.md')) return { deny: `ENOENT: ${e.path}` }
+    return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: real } }
+  })
+  const ran: string[] = []
+  on('tool.call', (_, e) => {
+    ran.push(e.tool)
+    return { result: {} }
+  })
+  return { ran }
+}
+
+test('Write, Edit and NotebookEdit in the channel are refused before they run', async ($, on) => {
+  engine(on)
+  const { ran } = files(on)
+  await $.session.start(START)
+
+  const write = await $.tool.call({ tool: 'Write', file_path: '/h/.claude/huddle/2026-11-06.md', content: 'x' })
+  const edit = await $.tool.call({ tool: 'Edit', file_path: '/h/.claude/huddle/../huddle/a.md', old_string: 'a', new_string: 'b' })
+  const notebook = await $.tool.call({ tool: 'NotebookEdit', notebook_path: '/h/.claude/huddle/n.ipynb', new_source: 'x' })
+
+  expect(write.deny).toContain('append-only')
+  expect(write.deny).toContain('mcp__huddle__post')
+  expect(edit.deny).toContain('append-only')
+  expect(notebook.deny).toContain('append-only')
+  expect(ran).toEqual([])
+})
+
+test('a link into the channel is refused too', async ($, on) => {
+  engine(on)
+  const { ran } = files(on)
+  await $.session.start(START)
+
+  const write = await $.tool.call({ tool: 'Write', file_path: '/links/chan/2026-11-06.md', content: 'x' })
+
+  expect(write.deny).toContain('append-only')
+  expect(ran).toEqual([])
+})
+
+test('writes elsewhere, and Bash reads or appends, run as usual', async ($, on) => {
+  engine(on)
+  const { ran } = files(on)
+  await $.session.start(START)
+
+  await $.tool.call({ tool: 'Write', file_path: '/h/notes/huddle.md', content: 'x' })
+  await $.tool.call({ tool: 'Bash', command: 'tail -n 5 ~/.claude/huddle/2026-11-06.md' })
+  await $.tool.call({ tool: 'Bash', command: 'echo hi >> ~/.claude/huddle/2026-11-06.md' })
+
+  expect(ran).toEqual(['Write', 'Bash', 'Bash'])
+})
+
+test('Bash that rewrites or unflags the channel is refused with the reason', async ($, on) => {
+  engine(on)
+  const { ran } = files(on)
+  await $.session.start(START)
+
+  const unflag = await $.tool.call({ tool: 'Bash', command: 'chflags nouappnd ~/.claude/huddle/*.md' })
+  const clobber = await $.tool.call({ tool: 'Bash', command: 'echo x > /private/h/.claude/huddle/2026-11-06.md' })
+
+  expect(unflag.deny).toContain('runs chflags on it')
+  expect(clobber.deny).toContain('with >')
+  expect(ran).toEqual([])
+})
+
+test('the guard protects ~/.claude/huddle even while HUDDLE_DIR points elsewhere', async ($, on) => {
+  engine(on, undefined, '/tmp/chan')
+  files(on)
+  await $.session.start(START)
+
+  const real = await $.tool.call({ tool: 'Bash', command: 'rm ~/.claude/huddle/2026-11-06.md' })
+  const test = await $.tool.call({ tool: 'Bash', command: 'rm /tmp/chan/2026-11-06.md' })
+
+  expect(real.deny).toContain('runs rm on it')
+  expect(test.deny).toContain('runs rm on it')
+})
