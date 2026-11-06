@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { ago, bar, conversations, fitLines, parseRow, sortPeers, splitMentions } from './panel'
+import { ago, authorColor, barFill, mentionNotice, postLayout, conversations, fitLines, parseRow, postRowsFor, sortPeers, splitMentions } from './panel'
 
 const WHOLE = { isStdoutTruncated: false, isStderrTruncated: false }
 const START = { cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true } as const
@@ -44,6 +44,13 @@ function world(on: On, hasMockClock = false) {
     toasts: [] as string[],
     stops: [] as string[],
     stopFails: false,
+    /** What `ps` prints, and the app bundles that are editors (have a `code` command). */
+    ps: '',
+    editors: [] as string[],
+    /** Each `open` the plugin ran. */
+    opened: [] as string[][],
+    /** The commands the plugin registered, in order. */
+    commands: [] as string[],
     context: {} as Record<string, { mtimeMs: number; text: string }>,
     lists: 0,
     removed: [] as string[],
@@ -62,7 +69,10 @@ function world(on: On, hasMockClock = false) {
   if (!hasMockClock) on('clock.now', () => ({ value: Date.now() }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__huddle__${e.name}` } }))
-  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('command.register', (_, e) => {
+    state.commands.push(e.name)
+    return { value: { command: e.name } }
+  })
   on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
   on('session.id', () => ({ value: 'sid' }))
   on('session.cwd', () => ({ value: '/Users/me/Projects/huddle' }))
@@ -78,6 +88,9 @@ function world(on: On, hasMockClock = false) {
     return { value: undefined }
   })
   on('fs.stat', (_, e) => {
+    if (state.editors.some((app) => e.path === `${app}/Contents/Resources/app/bin`)) {
+      return { value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false } }
+    }
     const transcript = state.transcripts[e.path]
     if (transcript) return { value: { kind: 'file', size: 1, mtimeMs: transcript.mtimeMs, isLink: false } }
     if (!e.path.endsWith('.md')) return { deny: `ENOENT: ${e.path}` }
@@ -109,6 +122,11 @@ function world(on: On, hasMockClock = false) {
       if (state.stopFails) return { value: { exitCode: 1, stdout: '', stderr: `No job matching '${e.argv[2]}'.`, ...WHOLE } }
       state.peers = state.peers.filter((peer) => peer.id !== e.argv[2])
       return out(`stopped ${e.argv[2]}`)
+    }
+    if (cmd === '/bin/ps') return out(state.ps)
+    if (cmd === '/usr/bin/open') {
+      state.opened.push([...e.argv])
+      return out('')
     }
     if (cmd === '/bin/rm') {
       state.removed.push(...e.argv.slice(2))
@@ -173,13 +191,42 @@ test("/huddle opens the pane showing today's posts, on every surface", async ($,
   }
 })
 
+test('/huddle-panel opens the pane too, and both commands are registered', async ($, on) => {
+  const day = world(on)
+  await $.session.start(START)
+  expect(day.commands).toEqual(['huddle', 'huddle-panel'])
+
+  const ran = await $.command.run({ ...HUDDLE, command: 'huddle-panel' })
+  expect(String(ran.text)).toContain('#huddle opened')
+  expect(day.isOpen).toBe(true)
+})
+
+test("a session's icon brings its window forward; a background one says it has none", async ($, on) => {
+  const day = world(on)
+  day.peers[1] = { ...day.peers[1]!, pid: 520, cwd: '/p/coachcard' } as (typeof day.peers)[number]
+  day.ps = [
+    '  510   500 ??  /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)',
+    '  520   510 ??  /Users/me/.vscode/extensions/anthropic.claude-code/resources/native-binary/claude',
+  ].join('\n')
+  day.editors = ['/Applications/Visual Studio Code.app']
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+
+  await ui.press({ key: 'focus-s1' })
+  expect(day.opened).toEqual([['/usr/bin/open', '-a', '/Applications/Visual Studio Code.app', '/p/coachcard']])
+  await ui.press({ key: 'focus-bg-full' })
+  expect(await ui.find({ type: 'Text', text: /nightly-qa runs in the background, with no window: claude attach bg1 opens it/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('an empty day says so', async ($, on) => {
   world(on)
   await $.session.start(START)
   await $.command.run(HUDDLE)
 
   const ui = await $.ui.mount(PANE('terminal'))
-  expect((await ui.find({ type: 'Text', text: /No posts today/ }))?.text).toContain('click a session to mention it')
+  expect((await ui.find({ type: 'Text', text: /No posts today/ }))?.text).toContain('click a name to mention it')
   await ui.unmount()
 })
 
@@ -212,7 +259,9 @@ test('an unknown mention shows under the feed; an empty post does nothing', asyn
 
   await ui.input({ key: 'post', text: '@ghost hello' })
   expect(day.appended.length).toBe(1)
-  expect((await ui.find({ type: 'Text', text: /@ghost: no running session/ }))).toBeDefined()
+  // One short line names it; the reason went to a toast.
+  expect(await ui.find({ type: 'Text', text: '⚠ @ghost not notified' })).toBeDefined()
+  expect(day.toasts.some((toast) => toast.includes('@ghost: no running session'))).toBe(true)
   await ui.unmount()
 })
 
@@ -264,8 +313,8 @@ test('the session list opens from its header and offers Stop on background sessi
     const ui = await $.ui.mount(PANE(surface))
     // Open by default.
     expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 3 · 2 busy')
-    expect((await ui.find({ key: 'mention-bg-full' }))?.props.label).toMatch(/^\S+ nightly-qa$/)
-    expect(await ui.find({ type: 'Text', text: /this session/ })).toBeDefined()
+    expect((await ui.find({ key: 'mention-bg-full' }))?.props.label).toBe('nightly-qa')
+    expect(await ui.find({ type: 'Text', text: 'you' })).toBeDefined()
     expect(await ui.find({ key: 'stop-bg1' })).toBeDefined()
     // No Stop for interactive sessions, this one included.
     for (const id of ['sid', 's1', 'undefined']) expect(await ui.find({ key: `stop-${id}` })).toBeUndefined()
@@ -355,12 +404,12 @@ test("each session's row shows its context fill; a session without huddle shows 
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
 
-  expect((await ui.find({ type: 'Text', text: '▰▰▱▱▱ 42%' }))?.props.color).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: '42%' }))?.props.color).toBeUndefined()
   // Nearly full is drawn in the warning color.
-  expect((await ui.find({ type: 'Text', text: '▰▰▰▰▰ 91%' }))?.props.color).toBe('warning')
+  expect((await ui.find({ type: 'Text', text: '91%' }))?.props.color).toBe('warning')
   expect(await ui.findAll({ type: 'Text', text: /%$/ })).toHaveLength(2)
   // A session with neither huddle nor a transcript says so.
-  expect(await ui.find({ type: 'Text', text: 'no context data' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'no data' })).toBeDefined()
   // A file whose session is not running is not read.
   expect(day.reads.some((path) => path.includes('gone'))).toBe(false)
 
@@ -371,7 +420,7 @@ test("each session's row shows its context fill; a session without huddle shows 
   day.context.sid = { mtimeMs: 2, text: JSON.stringify({ percent: 55, at: 2 }) }
   await clock.advance(2000)
   expect(day.reads.length).toBe(reads + 1)
-  expect(await ui.find({ type: 'Text', text: '▰▰▰▱▱ 55%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '55%' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -399,8 +448,12 @@ test('the session list still shows when the context files cannot be read', async
   await ui.unmount()
 })
 
-const reply = (tokens: number, model = 'claude-opus-5-5') =>
-  JSON.stringify({ type: 'assistant', message: { model, usage: { input_tokens: tokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })
+const reply = (tokens: number, model = 'claude-opus-5-5', effort?: string) =>
+  JSON.stringify({
+    type: 'assistant',
+    ...(effort ? { effort } : {}),
+    message: { model, usage: { input_tokens: tokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+  })
 
 test("a session without huddle has its context read off its transcript, as a % where a huddle session on its model gives the window", async ($, on) => {
   const clock = mock.clock(on)
@@ -420,14 +473,21 @@ test("a session without huddle has its context read off its transcript, as a % w
   day.transcripts = {
     '/h/.claude/projects/-Users-me-coach-card/s1.jsonl': { mtimeMs: 1, text: `{"cut\n${reply(250_000)}\n` },
     '/h/.claude/projects/-Users-me-other/s2.jsonl': { mtimeMs: 1, text: `${reply(114_247, 'sonnet')}\n` },
+    // A session with huddle has its effort read off its transcript too.
+    '/h/.claude/projects/-Users-me-Projects-huddle/sid.jsonl': { mtimeMs: 1, text: `${reply(1000, 'claude-opus-5-5', 'max')}\n` },
   }
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('desktop'))
 
-  expect(await ui.find({ type: 'Text', text: '▰▰▰▱▱ ~50%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '~50%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'MAX' })).toBeDefined()
+  // Its context still comes from its own file, not the transcript.
+  expect(await ui.find({ type: 'Text', text: '11%' })).toBeDefined()
+  // A reply with no effort leaves the column blank.
+  expect(await ui.findAll({ type: 'Text', text: /^(L|M|H|X|MAX)$/ })).toHaveLength(1)
   // No huddle session on its model: tokens, not a guessed %.
-  expect(await ui.find({ type: 'Text', text: '~114k tokens' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '~114k tok' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /coach\.card/ })).toBeDefined()
 
   // A transcript is tailed again only once it changed, and at most every 10 s.
@@ -439,7 +499,7 @@ test("a session without huddle has its context read off its transcript, as a % w
   expect(day.tails).toBe(tails)
   await clock.advance(8000)
   expect(day.tails).toBe(tails + 1)
-  expect(await ui.find({ type: 'Text', text: '~600k tokens' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '~600k tok' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -501,6 +561,40 @@ test('clicking a session puts its @handle in the post box, once', async ($, on) 
   expect(day.appended).toEqual([])
 })
 
+test('typing is not drawn back into the post box; it grows to three lines', async ($, on) => {
+  world(on)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  const box = async () => (await ui.find({ key: 'post' }))?.props
+
+  await ui.input({ key: 'post', text: 'h', kind: 'change' })
+  await ui.input({ key: 'post', text: 'hi', kind: 'change' })
+  // A keystroke drawn back resets the field one character late.
+  expect((await box())?.value).toBe('')
+  expect((await box())?.rows).toBe(1)
+
+  await ui.input({ key: 'post', text: 'one\ntwo', kind: 'change' })
+  expect((await box())?.rows).toBe(2)
+  await ui.input({ key: 'post', text: 'a\nb\nc\nd\ne', kind: 'change' })
+  expect((await box())?.rows).toBe(3)
+  expect((await box())?.value).toBe('')
+
+  await ui.press({ key: 'mention-s1' })
+  expect((await box())?.value).toBe('a\nb\nc\nd\ne @coachcard-1e ')
+  await ui.input({ key: 'post', text: '', kind: 'change' })
+  expect((await box())?.rows).toBe(1)
+  await ui.unmount()
+})
+
+test('postRowsFor counts wrapped and typed lines, at most three', () => {
+  expect(postRowsFor('', 40)).toBe(1)
+  expect(postRowsFor('x'.repeat(32), 40)).toBe(1)
+  expect(postRowsFor('x'.repeat(33), 40)).toBe(2)
+  expect(postRowsFor('a\nb', 40)).toBe(2)
+  expect(postRowsFor('x'.repeat(500), 40)).toBe(3)
+})
+
 test('the feed draws mentions apart and each author with its icon', async ($, on) => {
   const day = world(on)
   day.lines = ['- 14:35 **you**: @coachcard-1e which tests?']
@@ -508,12 +602,12 @@ test('the feed draws mentions apart and each author with its icon', async ($, on
   await $.session.start(START)
   await $.command.run(HUDDLE)
   const ui = await $.ui.mount(PANE('terminal'))
-  expect((await ui.find({ type: 'Text', text: /^@coachcard-1e$/ }))?.props.color).toBe('suggestion')
+  expect((await ui.find({ type: 'Text', text: /^@coachcard-1e$/ }))?.props.backgroundColor).toBe('suggestion')
   expect(await ui.find({ type: 'Text', text: /^👤 you$/ })).toBeDefined()
   await ui.unmount()
 })
 
-test('splitMentions and bar', () => {
+test('splitMentions and barFill', () => {
   expect(splitMentions('hi @a, (@b-2.) mail x@y.z')).toEqual([
     { text: 'hi ' },
     { text: '@a', isMention: true },
@@ -521,7 +615,7 @@ test('splitMentions and bar', () => {
     { text: '@b-2', isMention: true },
     { text: '.) mail x@y.z' },
   ])
-  expect([bar(0), bar(9), bar(10), bar(50), bar(100)]).toEqual(['▱▱▱▱▱', '▱▱▱▱▱', '▰▱▱▱▱', '▰▰▰▱▱', '▰▰▰▰▰'])
+  expect([barFill(-5), barFill(9), barFill(100), barFill(140)]).toEqual(['0%', '9%', '100%', '100%'])
 })
 
 test('the talking arrow goes once the post is ten minutes old, with no other change', async ($, on) => {
@@ -535,5 +629,71 @@ test('the talking arrow goes once the post is ten minutes old, with no other cha
   await clock.advance(10 * 60_000 + 2000)
   expect(await ui.find({ type: 'Text', text: '→ @coachcard-1e' })).toBeUndefined()
   expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions 3 · 2 busy')
+  await ui.unmount()
+})
+
+test('mentionNotice names the undelivered mentions in one short line', () => {
+  expect(mentionNotice([])).toBe('')
+  expect(mentionNotice(['ghost', 'a'])).toBe('⚠ @ghost, @a not notified')
+})
+
+test('postLayout cuts a long post to its first rows and counts its more row', () => {
+  const short = postLayout('14:32 a ', 'hi', 40, false)
+  expect(short).toEqual({ body: 'hi', isLong: false, rows: 1 })
+  // Just past three rows by length: cut, with an ellipsis and a more row.
+  const long = postLayout('14:32 a ', 'x'.repeat(120), 40, false)
+  expect(long.isLong).toBe(true)
+  expect(long.rows).toBe(4)
+  expect(long.body.endsWith('…')).toBe(true)
+  expect([...long.body].length).toBeLessThan(120)
+  expect(postLayout('14:32 a ', 'x'.repeat(120), 40, true)).toEqual({ body: 'x'.repeat(120), isLong: true, rows: 5 })
+})
+
+test('an error notice stays; a repeated mention notice gets its own half minute', async ($, on) => {
+  const clock = mock.clock(on)
+  world(on, true)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  await ui.input({ key: 'post', text: '@ghost one' })
+  await clock.advance(25_000)
+  await ui.input({ key: 'post', text: '@ghost two' })
+  await clock.advance(6_000)
+  expect(await ui.find({ type: 'Text', text: '⚠ @ghost not notified' })).toBeDefined()
+  await clock.advance(25_000)
+  expect(await ui.find({ type: 'Text', text: '⚠ @ghost not notified' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('each author keeps one colour', () => {
+  expect(authorColor('huddle-5a')).toBe(authorColor('huddle-5a'))
+  expect(authorColor('huddle-5a')).toMatch(/^#[0-9a-f]{6}$/)
+})
+
+test('a notice clears itself after half a minute', async ($, on) => {
+  const clock = mock.clock(on)
+  const day = world(on, true)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  await ui.input({ key: 'post', text: '@ghost hello' })
+  expect(await ui.find({ type: 'Text', text: '⚠ @ghost not notified' })).toBeDefined()
+  await clock.advance(31_000)
+  expect(await ui.find({ type: 'Text', text: '⚠ @ghost not notified' })).toBeUndefined()
+  expect(day.appended.length).toBe(1)
+  await ui.unmount()
+})
+
+test('a long post shows its first rows and opens with more', async ($, on) => {
+  const day = world(on)
+  day.lines = [`- 14:32 **coachcard-1e**: ${'word '.repeat(200)}END`]
+  day.mtimeMs = 1
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  expect(await ui.find({ type: 'Text', text: /END/ })).toBeUndefined()
+  await ui.press({ key: 'more-0' })
+  expect(await ui.find({ type: 'Text', text: /END/ })).toBeDefined()
+  expect((await ui.find({ key: 'more-0' }))?.props.label).toBe('less')
   await ui.unmount()
 })

@@ -119,20 +119,23 @@ export async function ownName($: $): Promise<string> {
   return (await $.session.cwd()).split('/').filter(Boolean).at(-1) ?? 'session'
 }
 
+/** What became of a post's mentions: one line for the poster (empty with none), and the names no message reached. */
+export type Delivery = { text: string; undelivered: string[] }
+
 /**
  * Sends each session a post @mentions a message saying so, and toasts what
- * did not reach anyone. Returns one line for the poster; empty with no mentions.
+ * did not reach anyone.
  */
-export async function deliverMentions($: $, author: string, text: string, line: string, isPerson = false): Promise<string> {
+export async function deliverMentions($: $, author: string, text: string, line: string, isPerson = false): Promise<Delivery> {
   const names = parseMentions(text)
-  if (names.length === 0) return ''
+  if (names.length === 0) return { text: '', undelivered: [] }
   let rows: SessionRow[]
   try {
     rows = await sessions($)
   } catch (error) {
     const problem = `huddle: mentions not delivered: ${errorText(error)}`
     $.ui.toast(problem)
-    return problem
+    return { text: problem, undelivered: names }
   }
   // The person posting from this session's panel can mention this session too.
   const { targets, unknown } = resolveMentions(names, rows, await $.session.id(), isPerson)
@@ -161,7 +164,8 @@ export async function deliverMentions($: $, author: string, text: string, line: 
   ]
   if (problems.length > 0) $.ui.toast(`huddle: ${problems.join('; ')}`)
   const parts = [reached.length > 0 ? `notified ${[...new Set(reached)].join(', ')}` : '', ...problems].filter(Boolean)
-  return parts.join('; ')
+  const undelivered = [...new Set([...unknown, ...sent.filter((s) => !s.ok).map((s) => s.name)])]
+  return { text: parts.join('; '), undelivered }
 }
 
 /** The channel folder: `$HUDDLE_DIR` when set (for testing), else ~/.claude/huddle. */
@@ -297,10 +301,12 @@ export type PeerStatus = {
   /** `estimated` when read off its transcript: it has no huddle loaded. No `percent` when its window is unknown. */
   context?: { percent?: number; tokens?: number; estimated?: true }
   post?: { at: number; to: string[] }
+  /** The effort level it last ran at (`high`). */
+  effort?: string
 }
 
 const statuses = new Map<string, { mtimeMs: number; status: Status }>()
-const transcripts = new Map<string, { mtimeMs: number; readAt: number; tokens?: number; model?: string }>()
+const transcripts = new Map<string, { mtimeMs: number; readAt: number; tokens?: number; model?: string; effort?: string }>()
 const TRANSCRIPT_REREAD_MS = 10_000
 /** How often, and past what age, the files of sessions no longer running are removed. */
 const SWEEP_MS = 60 * 60_000
@@ -391,17 +397,22 @@ export async function peerStatuses($: $, rows: readonly SessionRow[]): Promise<M
     const status = published.get(row.sessionId)
     const peer: PeerStatus = {}
     if (status?.post) peer.post = status.post
+    // Every session's transcript says the effort of its last reply; one without huddle, its context too.
+    const read =
+      row.cwd && configDir && isFileSafe(row.sessionId)
+        ? await transcriptTokens($, transcriptFile(configDir, row.cwd, row.sessionId), row.sessionId)
+        : undefined
+    if (read?.effort) peer.effort = read.effort
     if (status?.percent !== undefined) {
       peer.context = { percent: status.percent, ...(status.tokens !== undefined ? { tokens: status.tokens } : {}) }
-    } else if (row.cwd && configDir && isFileSafe(row.sessionId)) {
-      const read = await transcriptTokens($, transcriptFile(configDir, row.cwd, row.sessionId), row.sessionId)
-      if (read?.tokens !== undefined) {
+    } else if (read) {
+      if (read.tokens !== undefined) {
         const window = read.model ? windows.get(modelFamily(read.model)) : undefined
         const percent = window && read.tokens <= window ? clampPercent((read.tokens / window) * 100) : undefined
         peer.context = { ...(percent !== undefined ? { percent } : {}), tokens: read.tokens, estimated: true }
       }
     }
-    if (peer.context || peer.post) out.set(row.sessionId, peer)
+    if (peer.context || peer.post || peer.effort) out.set(row.sessionId, peer)
   }))
   return out
 }
@@ -429,7 +440,7 @@ async function transcriptsRoot($: $): Promise<string | undefined> {
 }
 
 /** A transcript's last reply, read again only when the file changed. */
-async function transcriptTokens($: $, file: string, id: string): Promise<{ tokens?: number; model?: string } | undefined> {
+async function transcriptTokens($: $, file: string, id: string): Promise<{ tokens?: number; model?: string; effort?: string } | undefined> {
   let mtimeMs: number
   try {
     mtimeMs = (await $.fs.stat(file)).mtimeMs

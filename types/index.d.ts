@@ -19,11 +19,16 @@ export type Peer = {
   startedAt?: number
   /** The name of its working folder. */
   project?: string
+  /** Its working folder and process id, to bring its window forward. */
+  cwd?: string
+  pid?: number
   /**
    * How full its context window is. `estimated` when read off its transcript
    * (no huddle loaded there); no `percent` when its window is unknown.
    */
   context?: { percent?: number; tokens?: number; estimated?: true }
+  /** The effort level it last ran at (`high`); absent on a model without effort. */
+  effort?: string
   /** Its last post through huddle, and the names it mentioned. */
   post?: { at: number; to: string[] }
 }
@@ -32,12 +37,21 @@ declare module 'claude-code' {
   interface PluginState {
     huddle: {
       feed: Shaped<Feed>
-      /** What the post box holds, so it can be cleared after a post. */
+      /**
+       * What the pane last put in the post box (cleared after a post, a
+       * mention added); drawn as its `value`, so it changes only then.
+       */
       draft: string
+      /** What the post box holds as typed; nothing drawn reads it. */
+      typing: string
+      /** How many lines tall the post box is drawn, 1 to 3. */
+      postRows: number
       /** One dim line under the feed: what went wrong with the last post or stop. */
       notice: string
       /** The running sessions, this one included. */
       peers: Shaped<Peer[]>
+      /** The long posts opened past their first rows, by their line. */
+      expanded: string[]
       /** Whether the session list is expanded. */
       showPeers: boolean
     }

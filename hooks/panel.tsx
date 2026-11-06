@@ -1,17 +1,37 @@
 import { atom, read, update } from 'claude-code'
 import type { On, Timer } from 'claude-code'
 import type { Feed, Peer } from '../types'
-import { PERSON_ICON, addMention, isMentionable, compactTokens, dayFile, handle, localDay, sessionIcon, tailFile } from './huddle'
+import { PERSON_ICON, addMention, effortBadge, isMentionable, compactTokens, dayFile, handle, localDay, sessionIcon, tailFile } from './huddle'
+import { focusPeer } from './focus'
 import { type $, channelDir, deliverMentions, errorText, forgetSessions, peerStatuses, post, runClaude, runner, sessions } from './channel'
 
 export const PANE = 'huddle'
+/**
+ * The commands that open the pane. `/huddle` is also the name of huddle's MCP
+ * server, which the VS Code extension's `/` menu lists as a row of its own, so
+ * Enter there can open the server's settings instead: `/huddle-panel` names
+ * only the pane.
+ */
+export const OPEN_COMMANDS = ['huddle', 'huddle-panel'] as const
 const TITLE = '#huddle'
 const POLL_MS = 2000
 const FEED_LINES = 200
-/** Rows the pane keeps below the feed: the notice and the post box. */
+/** Rows the pane keeps below the feed: the notice and a one-line post box. */
 const BELOW_FEED = 3
+/** The most lines the post box grows to before its text scrolls within. */
+const MAX_POST_ROWS = 3
+/** Columns of the pane the post box's own chrome takes (its prompt mark and `post` label). */
+const POST_CHROME = 8
 /** The session list's header row. */
 const HEADER_ROWS = 1
+/** The divider and day header between the list and the feed. */
+const DIVIDER_ROWS = 2
+/** Rows a long post shows until opened, plus its `more` row. */
+const COLLAPSED_ROWS = 3
+/** How long a notice stays under the feed. */
+const NOTICE_MS = 30_000
+/** Author colours: one per name, the same in every panel. */
+const AUTHOR_COLORS = ['#e07a5f', '#81b29a', '#e9c46a', '#7aa2f7', '#bb9af7', '#7dcfff', '#ff9e64', '#9ece6a']
 
 // Change the tag when Feed's fields change: a value an earlier version stored
 // outlives a reload, and the tag makes this code read it as the initial value.
@@ -19,8 +39,11 @@ const feed = atom({ plugin: 'huddle', key: 'feed' } as const, { day: '', lines: 
   shape: 'feed-1',
 })
 const draft = atom({ plugin: 'huddle', key: 'draft' } as const, '')
+const typing = atom({ plugin: 'huddle', key: 'typing' } as const, '')
+const postRows = atom({ plugin: 'huddle', key: 'postRows' } as const, 1)
 const notice = atom({ plugin: 'huddle', key: 'notice' } as const, '')
-const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-3' })
+const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-5' })
+const expanded = atom({ plugin: 'huddle', key: 'expanded' } as const, [] as string[])
 const showPeers = atom({ plugin: 'huddle', key: 'showPeers' } as const, true)
 
 /** Background sessions first (the ones Stop applies to), then newest first. */
@@ -55,8 +78,8 @@ export async function refreshPeers($: $): Promise<void> {
     // The list stands without the figures.
     const status = await peerStatuses($, listed).catch(() => new Map<string, never>())
     rows = sortPeers(
-      listed.map(({ sessionId, name, kind, status: state, id, startedAt, cwd }) => {
-        const { context, post: last } = status.get(sessionId) ?? {}
+      listed.map(({ sessionId, name, kind, status: state, id, startedAt, cwd, pid }) => {
+        const { context, post: last, effort } = status.get(sessionId) ?? {}
         // Dropped once old, so the row's arrow goes with the next poll.
         const post = last && now - last.at < TALK_MS ? last : undefined
         const project = cwd?.split('/').filter(Boolean).at(-1)
@@ -68,7 +91,10 @@ export async function refreshPeers($: $): Promise<void> {
           id,
           startedAt,
           ...(project ? { project } : {}),
+          ...(cwd ? { cwd } : {}),
+          ...(typeof pid === 'number' ? { pid } : {}),
           ...(context ? { context } : {}),
+          ...(effort ? { effort } : {}),
           ...(post ? { post } : {}),
         }
       }),
@@ -87,10 +113,15 @@ export async function refreshPeers($: $): Promise<void> {
 const AGES_MS = 30_000
 let lastPeersWrite = 0
 
-/** Five cells filled to `percent`: `▰▰▱▱▱`. */
-export function bar(percent: number): string {
-  const filled = Math.min(5, Math.max(0, Math.round(percent / 20)))
-  return '▰'.repeat(filled) + '▱'.repeat(5 - filled)
+/** Columns of a session row's right side, so every row's bar, figure and age line up. */
+const EFFORT_COLUMNS = 3
+const BAR_COLUMNS = 10
+const PERCENT_COLUMNS = 5
+const AGE_COLUMNS = 3
+
+/** How much of the bar is filled: `percent` held to 0 to 100. */
+export function barFill(percent: number): string {
+  return `${Math.min(100, Math.max(0, percent))}%`
 }
 
 /** Whether `name` is one of the names a post mentioned. */
@@ -157,7 +188,7 @@ export async function stopPeer($: $, peer: Peer): Promise<void> {
     await update($, notice, () => '')
     $.ui.toast(`Stopped ${peer.name}. Resume it with: claude attach ${peer.id}`)
   } else {
-    await update($, notice, () => `Could not stop ${peer.name}: ${(stderr || stdout).trim()}`)
+    await say($, `Could not stop ${peer.name}: ${(stderr || stdout).trim()}`)
   }
   forgetSessions()
   await refreshPeers($)
@@ -205,23 +236,113 @@ function ensurePolling($: $): void {
 async function openPane($: $): Promise<boolean> {
   await refresh($, true)
   await refreshPeers($)
+  // The box draws `draft`; bring back what was typed before the pane closed.
+  const typed = await read($, typing)
+  await update($, draft, () => typed)
   const { isPlaced } = await $.ui.open({ id: PANE, title: TITLE })
   ensurePolling($)
   return isPlaced
 }
 
+/** The pane's width at its last draw, which sizes the post box. */
+let paneColumns = 80
+
+/** How many lines `text` takes in a post box `columns` wide: 1 to MAX_POST_ROWS. */
+export function postRowsFor(text: string, columns: number): number {
+  const width = Math.max(1, columns - POST_CHROME)
+  const lines = text.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil([...line].length / width)), 0)
+  return Math.min(MAX_POST_ROWS, lines)
+}
+
+/**
+ * Notes what the person typed. Nothing drawn reads it, so a keystroke redraws
+ * nothing: drawing each one back as `value` resets the field to a text one
+ * keystroke late, which drops the newest character and moves the cursor.
+ * Only a change in the box's height redraws.
+ */
+function noteTyping($: $, text: string): Promise<void> {
+  // One at a time, so a slow earlier keystroke can't land after a later one.
+  typingQueue = typingQueue
+    .then(async () => {
+      await update($, typing, () => text)
+      const rows = postRowsFor(text, paneColumns)
+      if (rows !== (await read($, postRows))) await update($, postRows, () => rows)
+    })
+    .catch(() => {})
+  return typingQueue
+}
+let typingQueue: Promise<void> = Promise.resolve()
+
+/** Puts `text` in the post box, replacing what the person typed. */
+async function setPostBox($: $, text: string): Promise<void> {
+  // The field takes a value only when it differs from the last one drawn: when
+  // the person edited away from that text, draw what they have first.
+  const typed = await read($, typing)
+  if (text === (await read($, draft)) && typed !== text) await update($, draft, () => typed)
+  await update($, draft, () => text)
+  await noteTyping($, text)
+}
+
+/**
+ * Shows one line under the feed until another replaces it; with `fades`, it
+ * also clears itself after NOTICE_MS (a newer notice, even the same words, is
+ * left alone).
+ */
+async function say($: $, text: string, fades = false): Promise<void> {
+  const shown = ++notices
+  await update($, notice, () => text)
+  if (!fades || text === '') return
+  $.clock.after(NOTICE_MS, () => {
+    if (notices === shown) void update($, notice, () => '').catch(() => {})
+  })
+}
+let notices = 0
+
+/**
+ * The notice for a post's undelivered mentions: one short line naming them
+ * (`⚠ @a, @b not notified`); the full reasons went to a toast.
+ */
+export function mentionNotice(undelivered: readonly string[]): string {
+  return undelivered.length > 0 ? `⚠ ${undelivered.map((name) => `@${name}`).join(', ')} not notified` : ''
+}
+
+/**
+ * How a post draws in the feed `columns` wide: cut to about COLLAPSED_ROWS
+ * rows unless opened (`isLong`, with an ellipsis), and the rows it takes,
+ * its `more` row included. The cut leaves slack for word wrap and wide icons.
+ */
+export function postLayout(prefix: string, body: string, columns: number, isOpen: boolean): { body: string; isLong: boolean; rows: number } {
+  const width = Math.max(1, columns)
+  const length = [...prefix].length + [...body].length
+  const wraps = Math.max(1, Math.ceil(length / width))
+  if (wraps <= COLLAPSED_ROWS) return { body, isLong: false, rows: wraps }
+  if (isOpen) return { body, isLong: true, rows: wraps + 1 }
+  const slack = Math.ceil(width / 5)
+  const room = Math.max(0, COLLAPSED_ROWS * (width - slack) - [...prefix].length - 1)
+  return { body: `${[...body].slice(0, room).join('')}…`, isLong: true, rows: COLLAPSED_ROWS + 1 }
+}
+
+/** What a post's time and author take before its body. */
+const postPrefix = (time: string, author: string) => `${time} ${author} `
+
+/** An author's colour, fixed by name. */
+export function authorColor(name: string): string {
+  let hash = 0
+  for (const ch of name) hash = (hash * 31 + ch.codePointAt(0)!) >>> 0
+  return AUTHOR_COLORS[hash % AUTHOR_COLORS.length]!
+}
+
 /** Posts what the person typed, signed `you`, and delivers its mentions. */
 export async function submit($: $, text: string): Promise<void> {
   if (text.trim() === '') return
-  await update($, draft, () => '')
+  await setPostBox($, '')
   try {
     const line = await post($, 'you', text)
-    const mentions = await deliverMentions($, 'you', text, line, true)
-    const problems = mentions.split('; ').filter((part) => part !== '' && !part.startsWith('notified '))
-    await update($, notice, () => problems.join('; '))
+    const { undelivered } = await deliverMentions($, 'you', text, line, true)
+    await say($, mentionNotice(undelivered), true)
   } catch (error) {
-    await update($, draft, () => text)
-    await update($, notice, () => `Not posted: ${errorText(error)}`)
+    await setPostBox($, text)
+    await say($, `Not posted: ${errorText(error)}`)
   }
   await refresh($, true)
 }
@@ -238,13 +359,17 @@ export function parseRow(line: string): Row {
  * The newest lines that fit `rows` rows `columns` wide, oldest first; each
  * line counts the rows it wraps to.
  */
-export function fitLines(lines: readonly string[], rows: number, columns: number): string[] {
-  const width = Math.max(1, columns)
+export function fitLines(
+  lines: readonly string[],
+  rows: number,
+  columns: number,
+  rowsOf: (line: string) => number = (line) => Math.max(1, Math.ceil([...line].length / Math.max(1, columns))),
+): string[] {
   const kept: string[] = []
   let used = 0
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!
-    const cost = Math.max(1, Math.ceil([...line].length / width))
+    const cost = rowsOf(line)
     if (used + cost > rows && kept.length > 0) break
     kept.unshift(line)
     used += cost
@@ -252,9 +377,11 @@ export function fitLines(lines: readonly string[], rows: number, columns: number
   return kept
 }
 
-/** The panel's part of `session.start`: the /huddle command, and polling again after a reload. */
+/** The panel's part of `session.start`: the commands that open it, and polling again after a reload. */
 export async function startPanel($: $): Promise<void> {
-  await $.command.register({ name: 'huddle', description: 'Open #huddle: the channel every local session shares' })
+  for (const name of OPEN_COMMANDS) {
+    await $.command.register({ name, description: 'Open #huddle: the channel every local session shares' })
+  }
   // A reload keeps the pane up but drops timers: start polling again.
   if ((await $.ui.panes()).some((pane) => pane.id === PANE)) {
     await refresh($, true)
@@ -264,28 +391,41 @@ export async function startPanel($: $): Promise<void> {
 }
 
 export function registerPanel(on: On): void {
-  on('command.run', { command: 'huddle' }, async ($) => {
-    const isPlaced = await openPane($)
-    return { text: isPlaced ? '#huddle opened.' : '#huddle opens when the window is wide enough.' }
-  })
+  for (const command of OPEN_COMMANDS) {
+    on('command.run', { command }, async ($) => {
+      const isPlaced = await openPane($)
+      return { text: isPlaced ? '#huddle opened.' : '#huddle opens when the window is wide enough.' }
+    })
+  }
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Input, Button } = $.ui.resolve(e)
     const { lines } = await read($, feed)
     const typed = await read($, draft)
+    const rows = await read($, postRows)
     const problem = await read($, notice)
     const everyone = await read($, peers)
     const isListOpen = await read($, showPeers)
+    const opened = new Set(await read($, expanded))
     const selfId = await $.session.id()
     const now = await $.clock.now()
 
     const bodyRows = e.props.scroll.bodyRows
+    paneColumns = e.props.bodyColumns
     // The list takes at most half the pane; the rest is the feed's.
     const listRoom = Math.max(1, Math.floor(bodyRows / 2) - HEADER_ROWS)
     const listed = isListOpen ? everyone.slice(0, everyone.length > listRoom ? listRoom - 1 : listRoom) : []
     const hidden = isListOpen ? everyone.length - listed.length : 0
-    const listRows = HEADER_ROWS + listed.length + (hidden > 0 ? 1 : 0)
-    const shown = fitLines(lines, Math.max(1, bodyRows - BELOW_FEED - listRows), e.props.bodyColumns)
+    const listRows = HEADER_ROWS + listed.length + (hidden > 0 ? 1 : 0) + DIVIDER_ROWS
+    const columns = e.props.bodyColumns
+    const authorOf = (name: string) => [authorIcon(name, everyone), name].filter(Boolean).join(' ')
+    // One layout per line, so the room counted is the room drawn; a line that is no post is drawn whole.
+    const layoutOf = (line: string) => {
+      const row = parseRow(line)
+      if ('raw' in row) return { rows: Math.max(1, Math.ceil([...row.raw].length / Math.max(1, columns))) }
+      return postLayout(postPrefix(row.time, authorOf(row.name)), row.body, columns, opened.has(line))
+    }
+    const shown = fitLines(lines, Math.max(1, bodyRows - BELOW_FEED - (rows - 1) - listRows), columns, (line) => layoutOf(line).rows)
     const busy = everyone.filter((peer) => peer.status === 'busy').length
     const talks = conversations(everyone, now)
     const header = [`Sessions ${everyone.length}`, busy > 0 ? `${busy} busy` : '', talks.size > 0 ? `${talks.size} talking` : '']
@@ -305,37 +445,45 @@ export function registerPanel(on: On): void {
           const isBusy = peer.status === 'busy'
           const { percent, tokens, estimated } = peer.context ?? {}
           const talk = talks.get(peer.sessionId)
+          const isFull = percent !== undefined && percent >= CONTEXT_WARN
+          const effort = effortBadge(peer.effort)
           return (
             <Box key={`peer-${peer.sessionId}`} flexDirection="row" gap={1}>
               <Text color={isBusy ? 'warning' : undefined} dimColor={!isBusy}>
                 {isBusy ? '●' : '○'}
               </Text>
               <Button
-                key={`mention-${peer.sessionId}`}
+                key={`focus-${peer.sessionId}`}
                 plain
-                label={`${sessionIcon(peer.sessionId)} ${peer.name}`}
+                label={sessionIcon(peer.sessionId)}
                 onPress={() =>
-                  void (isMentionable(peer.name)
-                    ? update($, draft, (typed) => addMention(typed, peer.name))
-                    : update($, notice, () => `${peer.name} can't be @mentioned: a mention is letters, digits, . _ and -`))
+                  void focusPeer($, peer)
+                    .then((problem) => (problem ? say($, problem) : undefined))
+                    .catch(() => {})
                 }
               />
+              <Box flexDirection="row" gap={1} flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+              <Button
+                key={`mention-${peer.sessionId}`}
+                plain
+                dimColor={!isBusy}
+                label={peer.name}
+                onPress={() =>
+                  void (isMentionable(peer.name)
+                    ? read($, typing).then((typed) => setPostBox($, addMention(typed, peer.name)))
+                    : say($, `${peer.name} can't be @mentioned: a mention is letters, digits, . _ and -`))
+                }
+              />
+              {isSelf && (
+                <Text backgroundColor="suggestion" color="inverseText" size="caption">
+                  you
+                </Text>
+              )}
               <Text dimColor wrap="truncate">
-                {[isSelf ? 'this session' : '', peer.project ?? '', peer.kind === 'background' ? 'bg' : '']
+                {[peer.project ?? '', peer.kind === 'background' ? 'bg' : '']
                   .filter(Boolean)
                   .join(' · ')}
               </Text>
-              {percent !== undefined ? (
-                <Text dimColor={percent < CONTEXT_WARN} color={percent >= CONTEXT_WARN ? 'warning' : undefined}>
-                  {bar(percent)} {estimated ? '~' : ''}
-                  {percent}%
-                </Text>
-              ) : tokens !== undefined ? (
-                <Text dimColor>~{compactTokens(tokens)} tokens</Text>
-              ) : (
-                <Text dimColor>no context data</Text>
-              )}
-              {peer.startedAt ? <Text dimColor>{ago(now - peer.startedAt)}</Text> : null}
               {talk && (
                 <Text color="suggestion">
                   {[
@@ -349,39 +497,104 @@ export function registerPanel(on: On): void {
               {peer.kind === 'background' && peer.id && !isSelf && (
                 <Button key={`stop-${peer.id}`} label="stop" onPress={() => void stopPeer($, peer)} />
               )}
+              </Box>
+              <Box width={EFFORT_COLUMNS} flexShrink={0} justifyContent="flex-end">
+                {effort && <Text dimColor>{effort}</Text>}
+              </Box>
+              <Box width={BAR_COLUMNS} flexShrink={0}>
+                {percent !== undefined ? (
+                  <Box key={`bar-${peer.sessionId}`} width={BAR_COLUMNS} height={1} backgroundColor="subtle" overflow="hidden">
+                    <Box width={barFill(percent)} height="100%" backgroundColor={isFull ? 'warning' : 'suggestion'} />
+                  </Box>
+                ) : (
+                  <Text dimColor wrap="truncate">
+                    {tokens !== undefined ? `~${compactTokens(tokens)} tok` : 'no data'}
+                  </Text>
+                )}
+              </Box>
+              <Box width={PERCENT_COLUMNS} flexShrink={0} justifyContent="flex-end">
+                {percent !== undefined && (
+                  <Text tabular dimColor={!isFull} color={isFull ? 'warning' : undefined}>
+                    {estimated ? '~' : ''}
+                    {percent}%
+                  </Text>
+                )}
+              </Box>
+              <Box width={AGE_COLUMNS} flexShrink={0} justifyContent="flex-end">
+                {peer.startedAt ? (
+                  <Text tabular dimColor>
+                    {ago(now - peer.startedAt)}
+                  </Text>
+                ) : null}
+              </Box>
             </Box>
           )
         })}
         {hidden > 0 && <Text dimColor>+{hidden} more</Text>}
+        <Text dimColor wrap="truncate">
+          {'─'.repeat(Math.max(1, columns))}
+        </Text>
+        <Text dimColor size="caption">
+          Today
+        </Text>
         <Box flexDirection="column" flexGrow={1}>
-          {shown.length === 0 && <Text dimColor>No posts today. Write one below; click a session to mention it.</Text>}
+          {shown.length === 0 && <Text dimColor>No posts today. Write one below; click a name to mention it.</Text>}
           {shown.map((line, i) => {
             const row = parseRow(line)
-            return 'raw' in row ? (
-              <Text key={`line-${i}`} wrap="wrap">{row.raw}</Text>
-            ) : (
-              <Text key={`line-${i}`} wrap="wrap">
-                <Text dimColor>{row.time}</Text> <Text bold>{[authorIcon(row.name, everyone), row.name].filter(Boolean).join(' ')}</Text>{' '}
-                {splitMentions(row.body).map((part, j) =>
-                  part.isMention ? (
-                    <Text key={`m-${j}`} color="suggestion" bold>
-                      {part.text}
-                    </Text>
-                  ) : (
-                    part.text
-                  ),
+            if ('raw' in row) {
+              return (
+                <Text key={`line-${i}`} wrap="wrap">
+                  {row.raw}
+                </Text>
+              )
+            }
+            const author = authorOf(row.name)
+            const isOpen = opened.has(line)
+            const { body, isLong } = postLayout(postPrefix(row.time, author), row.body, columns, isOpen)
+            return (
+              <Box key={`line-${i}`} flexDirection="column" marginBottom="sm">
+                <Text wrap="wrap">
+                  <Text dimColor size="caption">
+                    {row.time}
+                  </Text>{' '}
+                  <Text bold color={authorColor(row.name)}>
+                    {author}
+                  </Text>{' '}
+                  {splitMentions(body).map((part, j) =>
+                    part.isMention ? (
+                      <Text key={`m-${j}`} color="inverseText" backgroundColor="suggestion">
+                        {part.text}
+                      </Text>
+                    ) : (
+                      part.text
+                    ),
+                  )}
+                </Text>
+                {isLong && (
+                  <Button
+                    key={`more-${i}`}
+                    plain
+                    dimColor
+                    label={isOpen ? 'less' : 'more'}
+                    onPress={() =>
+                      void update($, expanded, (open) =>
+                        open.includes(line) ? open.filter((kept) => kept !== line) : [...open, line].slice(-50),
+                      )
+                    }
+                  />
                 )}
-              </Text>
+              </Box>
             )
           })}
         </Box>
         {problem !== '' && <Text dimColor>{problem}</Text>}
         <Input
           key="post"
-          placeholder="Post to #huddle; click a session or type @name to mention it"
+          placeholder="Message #huddle · @name to mention"
           value={typed}
+          rows={rows}
           submitLabel="post"
-          onInput={(value) => void update($, draft, () => value)}
+          onInput={(value) => void noteTyping($, value)}
           onSubmit={(value) => void submit($, value)}
         />
       </Box>
