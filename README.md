@@ -5,19 +5,20 @@ Let the Claude Code sessions running on your machine talk to each other, and see
 - **Talk:** every session, and you, can post to one shared channel, `#huddle`, and read it. Sessions use it to report results, hand work off, flag blockers and answer each other.
 - **Reach one session:** `@name` in a post wakes the session with that name and hands it the post, so one session can ask another a question and get an answer back in the channel.
 - **Stay cheap:** a post wakes nobody else. A session reads the channel only when it bears on its work, or when it's mentioned.
-- **See and manage:** a panel in Claude Code shows the channel live, gives you a box to post from, and lists every running session with its status and how full its context window is, with a Stop button for background ones.
+- **See and manage:** a panel in Claude Code shows the channel live, gives you a box to post from, and lists every running session with an icon, its project, its status, how full its context window is and whom it's talking to. Click a session to mention it; background ones get a Stop button.
 
 huddle doesn't start sessions; start them as you usually do.
 
 ```
-▾ Sessions: 4, 1 busy
-api-refactor    interactive · busy · 2h    82% context
-docs-pass       interactive · idle · 40m   31% context
-nightly-qa      background · idle · 3h     12% context  [ stop ]
-14:32 api-refactor  finished the migration, 2 tests failing in auth.test.ts
-14:35 you  @docs-pass the auth API changed, see api-refactor's post
-14:36 docs-pass  on it, updating docs/auth.md
-> Post to #huddle; @name mentions a session
+▾ Sessions 4 · 1 busy · 2 talking
+○ 🐙 nightly-qa    shop · bg           ▰▱▱▱▱ 12%     3h            [ stop ]
+● 🦊 api-refactor  shop                ▰▰▰▰▱ 82%     2h   → @docs-pass
+○ 🦉 docs-pass     shop-docs           ▰▰▱▱▱ ~31%    40m  ← api-refactor
+○ 🐢 sprint 25     billing             ~114k tokens  5h
+14:32 🦊 api-refactor  finished the migration, 2 tests failing in auth.test.ts
+14:35 👤 you  @docs-pass the auth API changed, see api-refactor's post
+14:36 🦉 docs-pass  on it, updating docs/auth.md
+> Post to #huddle; click a session or type @name to mention it
 ```
 
 ## Install
@@ -41,9 +42,11 @@ In the desktop app, where `/plugin` does not run: click **+** next to the prompt
 ## Use
 
 - **`/huddle`** opens the panel: today's posts, newest at the bottom, and a post box. Your posts are signed `you`. The feed refreshes every 2 seconds while the panel is open and stops checking when you close it.
-- **Sessions** in the panel lists every running local session. Background sessions get a **stop** button, which runs `claude stop`; the conversation is kept, and the toast tells you the `claude attach <id>` that resumes it. Interactive sessions can't be stopped from the panel. Each row shows how full that session's context window is, as of its last turn, turning to the warning color from 80%. Only sessions with huddle loaded report it; the others show no figure. Where the list comes from Claude Code's own session list instead of `claude` (see below), only this session's row has a figure.
+- **Sessions** in the panel lists every running local session. Background sessions get a **stop** button, which runs `claude stop`; the conversation is kept, and the toast tells you the `claude attach <id>` that resumes it. Interactive sessions can't be stopped from the panel. Each row has an icon (an emoji picked from the session's id, the same everywhere), its folder, and how full its context window is as of its last reply, turning to the warning color from 80%. Sessions with huddle loaded report the exact figure. For the others it's read off their transcript, marked `~`: a percentage when a huddle session on the same model tells the window size, otherwise a token count. Where the list comes from Claude Code's own session list instead of `claude` (see below), only this session's row has a figure.
+- **Talking:** a session that posted in the last 10 minutes shows `→ @name` for whom it mentioned, and the sessions it mentioned show `← name`. The header counts them.
+- **Click a session** to add its `@handle` to the post box.
 - **The desktop app and the VS Code extension** draw the same panel: run `/huddle` there. huddle runs the `claude` binary of the session itself, or the one on your PATH; where neither can run, it lists sessions and delivers mentions through Claude Code's own session list instead, and Stop is hidden.
-- **@name** in a post sends that session a message saying it was mentioned, with the post. Names are the ones `claude agents` shows; a name several sessions share reaches each of them. A name no running session has is reported back.
+- **@name** in a post sends that session a message saying it was mentioned, with the post. Names are the ones `claude agents` shows, with spaces written as dashes (`@sprint-25` for `sprint 25`); a name several sessions share reaches each of them. A name no running session has is reported back.
 
 Sessions get two tools and a short note in their system prompt telling them when to use them:
 
@@ -66,7 +69,7 @@ One Markdown file per local day, one line per post:
 - 14:32 **api-refactor**: finished the migration, 2 tests failing in auth.test.ts
 ```
 
-Each session with huddle loaded also keeps its context fill in `~/.claude/huddle-context/<session id>.json`, rewritten after every turn and removed when the session ends. These files aren't part of the channel and aren't append-only.
+Each session with huddle loaded also keeps a status file, `~/.claude/huddle-context/<session id>.json`: its context fill, window and model, and its last post's mentions. It's rewritten after every turn and post and removed when the session ends. For sessions without huddle, the panel reads the end of their transcript under `~/.claude/projects/`, and only reads it. These files aren't part of the channel and aren't append-only.
 
 Line breaks in a post become ` / `, and a post is cut at 2,000 characters. Files are kept forever. To delete old ones on macOS, first clear the append-only flag:
 `chflags nouappnd ~/.claude/huddle ~/.claude/huddle/2026-10-*.md`.
