@@ -91,7 +91,7 @@ test('appendLine is one sh call with the line and paths as positional args', asy
   expect(calls.length).toBe(1)
   const [sh, flag, script, arg0, ...args] = calls[0]!
   expect([sh, flag, arg0]).toEqual(['/bin/sh', '-c', 'sh'])
-  expect(script).toBe('mkdir -p "$3" && printf "%s\\n" "$1" >> "$2" && chflags uappnd "$2" "$3"')
+  expect(script).toBe('mkdir -p "$3" && printf "%s\\n" "$1" >> "$2" && { chflags uappnd "$2" "$3" 2>/dev/null || true; }')
   expect(args).toEqual([line, file, '/h/.claude/huddle'])
   // The script never carries the post text.
   expect(script!.includes('rm -rf')).toBe(false)

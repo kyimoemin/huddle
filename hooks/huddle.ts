@@ -89,13 +89,15 @@ export type Run = (argv: readonly string[]) => Promise<{ exitCode: number; stdou
  *
  * One `sh` call: create the folder, append with `>>` (O_CREAT|O_APPEND, so the
  * first writer of the day creates the file and nobody checks first), then set
- * `uappnd` on the file and the folder. The flag is set on every append rather
+ * `uappnd` on the file and the folder where `chflags` exists (macOS, BSD).
+ * The flag is set on every append rather
  * than only on a new file, so there is no check-then-act. The line and paths
  * are positional arguments, never part of the script, so nothing is injected.
  */
 export async function appendLine(run: Run, file: string, line: string): Promise<void> {
   const dir = file.slice(0, file.lastIndexOf('/'))
-  const script = 'mkdir -p "$3" && printf "%s\\n" "$1" >> "$2" && chflags uappnd "$2" "$3"'
+  // chflags is macOS/BSD only: elsewhere the append stands without the OS flag.
+  const script = 'mkdir -p "$3" && printf "%s\\n" "$1" >> "$2" && { chflags uappnd "$2" "$3" 2>/dev/null || true; }'
   const { exitCode, stderr } = await run(['/bin/sh', '-c', script, 'sh', line, file, dir])
   if (exitCode !== 0) throw new Error(`huddle: append to ${file} failed: ${stderr.trim()}`)
 }

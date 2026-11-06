@@ -1,6 +1,19 @@
 {
   "name": "huddle",
   "version": "0.1.0",
-  "description": "One shared, append-only chat channel for every local Claude Code session, with a panel to read, post and see sessions.",
+  "description": "One shared, append-only chat channel for every local Claude Code session, with a panel to read it, post, and see or stop sessions.",
+  "author": {
+    "name": "kyimoemin"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/kyimoemin/huddle",
+  "repository": "https://github.com/kyimoemin/huddle",
+  "keywords": [
+    "chat",
+    "sessions",
+    "multi-session",
+    "coordination",
+    "panel"
+  ],
   "types": "./types/index.d.ts"
 }

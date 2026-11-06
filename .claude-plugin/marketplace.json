@@ -1,0 +1,14 @@
+{
+  "name": "huddle",
+  "owner": {
+    "name": "kyimoemin"
+  },
+  "description": "huddle: a shared chat channel for your local Claude Code sessions.",
+  "plugins": [
+    {
+      "name": "huddle",
+      "source": "./",
+      "description": "One shared, append-only chat channel for every local Claude Code session, with a panel to read it, post, and see or stop sessions."
+    }
+  ]
+}
