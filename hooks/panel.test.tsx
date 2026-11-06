@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { fitLines, parseRow } from './panel.tsx'
+import { ago, fitLines, parseRow, sortPeers } from './panel.tsx'
 
 const WHOLE = { isStdoutTruncated: false, isStderrTruncated: false }
 const START = { cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true } as const
@@ -41,6 +41,14 @@ function world(on: On) {
     stats: 0,
     appended: [] as string[],
     sent: [] as string[],
+    toasts: [] as string[],
+    stops: [] as string[],
+    stopFails: false,
+    peers: [
+      { sessionId: 'sid', name: 'huddle-5a', kind: 'interactive', status: 'busy', startedAt: 1000 },
+      { sessionId: 's1', name: 'coachcard-1e', kind: 'interactive', status: 'idle', startedAt: 2000 },
+      { sessionId: 'bg-full', id: 'bg1', name: 'nightly-qa', kind: 'background', status: 'busy', startedAt: 500 },
+    ] as Record<string, unknown>[],
   }
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__huddle__${e.name}` } }))
@@ -55,7 +63,10 @@ function world(on: On) {
   on('ui.panes', () => ({
     value: state.isOpen ? [{ id: 'huddle', title: '#huddle', isShown: true, isFocused: false, isPlaced: true }] : [],
   }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_, e) => {
+    state.toasts.push(e.text)
+    return { value: undefined }
+  })
   on('fs.stat', (_, e) => {
     if (!e.path.endsWith('.md')) return { deny: `ENOENT: ${e.path}` }
     state.stats++
@@ -66,8 +77,12 @@ function world(on: On) {
   on('process.run', (_, e) => {
     const [cmd] = e.argv
     const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', ...WHOLE } })
-    if (cmd === 'claude') {
-      return out(JSON.stringify([{ sessionId: 'sid', name: 'huddle-5a' }, { sessionId: 's1', name: 'coachcard-1e' }]))
+    if (cmd === 'claude' && e.argv[1] === 'agents') return out(JSON.stringify(state.peers))
+    if (cmd === 'claude' && e.argv[1] === 'stop') {
+      state.stops.push(e.argv[2]!)
+      if (state.stopFails) return { value: { exitCode: 1, stdout: '', stderr: `No job matching '${e.argv[2]}'.`, ...WHOLE } }
+      state.peers = state.peers.filter((peer) => peer.id !== e.argv[2])
+      return out(`stopped ${e.argv[2]}`)
     }
     if (cmd === '/usr/bin/tail') return state.mtimeMs === 0 ? out('', 1) : out(state.lines.map((l) => `${l}\n`).join(''))
     if (cmd === '/bin/sh') {
@@ -190,5 +205,88 @@ test('the feed follows the file every 2 s while the pane is open, then stops', a
   const statsAfterClose = day.stats
   await clock.advance(10_000)
   expect(day.stats).toBe(statsAfterClose)
+  await ui.unmount()
+})
+
+test('background sessions sort first, then newest; ago picks the largest unit', () => {
+  const sorted = sortPeers([
+    { sessionId: 'a', name: 'old', kind: 'interactive', startedAt: 1 },
+    { sessionId: 'b', name: 'bg', kind: 'background', startedAt: 0 },
+    { sessionId: 'c', name: 'new', kind: 'interactive', startedAt: 9 },
+  ])
+  expect(sorted.map((peer) => peer.name)).toEqual(['bg', 'new', 'old'])
+  expect([ago(45_000), ago(12 * 60_000), ago(3 * 3_600_000), ago(7 * 86_400_000), ago(-5)]).toEqual([
+    '45s', '12m', '3h', '7d', '0s',
+  ])
+})
+
+test('the session list opens from its header and offers Stop on background sessions only', async ($, on) => {
+  const day = world(on)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(PANE(surface))
+    const header = await ui.find({ key: 'peers' })
+    expect(header?.props.label).toBe('▸ Sessions: 3, 2 busy')
+    expect(await ui.find({ type: 'Text', text: /nightly-qa/ })).toBeUndefined()
+
+    await ui.press({ key: 'peers' })
+    expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions: 3, 2 busy')
+    expect(await ui.find({ type: 'Text', text: /nightly-qa/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /this session/ })).toBeDefined()
+    expect(await ui.find({ key: 'stop-bg1' })).toBeDefined()
+    // No Stop for interactive sessions, this one included.
+    for (const id of ['sid', 's1', 'undefined']) expect(await ui.find({ key: `stop-${id}` })).toBeUndefined()
+
+    await ui.press({ key: 'peers' })
+    await ui.unmount()
+  }
+  expect(day.stops).toEqual([])
+})
+
+test('Stop runs claude stop with the short id, toasts, and drops the row', async ($, on) => {
+  const day = world(on)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  await ui.press({ key: 'peers' })
+
+  await ui.press({ key: 'stop-bg1' })
+
+  expect(day.stops).toEqual(['bg1'])
+  expect(day.toasts.at(-1)).toBe('Stopped nightly-qa. Resume it with: claude attach bg1')
+  expect(await ui.find({ key: 'stop-bg1' })).toBeUndefined()
+  expect((await ui.find({ key: 'peers' }))?.props.label).toBe('▾ Sessions: 2, 1 busy')
+  await ui.unmount()
+})
+
+test('a Stop that fails says why under the feed and keeps the row', async ($, on) => {
+  const day = world(on)
+  day.stopFails = true
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  await ui.press({ key: 'peers' })
+
+  await ui.press({ key: 'stop-bg1' })
+
+  expect((await ui.find({ type: 'Text', text: /Could not stop nightly-qa/ }))?.text).toContain("No job matching 'bg1'")
+  expect(await ui.find({ key: 'stop-bg1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a long session list takes at most half the pane and counts the rest', async ($, on) => {
+  const day = world(on)
+  day.peers = Array.from({ length: 30 }, (_, i) => ({ sessionId: `s${i}`, name: `peer-${i}`, kind: 'interactive', status: 'idle' }))
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  const ui = await $.ui.mount(PANE('terminal'))
+  await ui.press({ key: 'peers' })
+
+  // bodyRows 20: half is 10, less the header is 9 rows: 8 sessions and "+22 more".
+  expect(await ui.find({ type: 'Text', text: /^peer-7$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^peer-8$/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /more$/ }))?.text).toBe('+22 more')
   await ui.unmount()
 })

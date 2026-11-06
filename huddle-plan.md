@@ -55,8 +55,8 @@ Not in scope: real-time group chat between agents, sessions on other machines, e
 | Panel | `$.ui.open({ id: 'huddle', title: 'Huddle' })` plus a `ui.render` hook on `Pane` | Shows the feed (the tail of today's file), a post box and the session list |
 | Live feed | `$.clock.every(2000)` checks the day file's `mtimeMs` and re-reads it only when that or the day changed | There is no fs watch API, so each tick is one stat call. It runs only while the pane is open: the first tick after `$.ui.panes()` stops listing it cancels the timer, and `session.start` restarts it after a reload |
 | Post box | `Input` with `onInput` tracking a `draft` atom and `onSubmit` posting as `you` | Clearing `draft` after a post empties the field. Mention problems and failures show as one dim line under the feed |
-| Session list | `$.tool.call({ tool: 'ListAgents' })`, the same list the model sees. Fallback: `$.process.run(["claude", "agents", ...])` | `$.tool.call` exists in the API. Whether ListAgents can be called this way is still to be confirmed |
-| Stop | `$.process.run(["claude", "stop", id])` | **To verify first:** which id `claude stop` accepts (ListAgents shows short refs like `[3d3fa0]`) |
+| Session list | `claude agents --json` through the same 10s cache as posts | A collapsible `▸ Sessions: N, M busy` header. Background sessions first, then newest. It takes at most half the pane, with `+N more` for the rest. This session is marked |
+| Stop | `$.process.run(["claude", "stop", row.id])`, the short id | Background sessions only, never this one. A toast confirms it with the `claude attach <id>` command to resume. A failure shows its reason under the feed and the row stays |
 | `/huddle` command | `$.command.register` and a `command.run` hook | Opens the panel |
 | Panel state | `atom`s declared in `types/index.d.ts` | `feed` (day, lines, mtime; shape `feed-1`), `draft`, `notice`. The session list comes in step 6 |
 
@@ -79,7 +79,7 @@ huddle/
 ## Open questions (findings, 2026-11-06)
 
 1. **The session's own name.** There is no `$.session.name()`. Answer: `$.session.id()`, then find that `sessionId` in `claude agents --json` and take its `name`. Look it up at post time, not once at start, because names change and repeat. ListAgents' header ("This session is huddle-5a [2195f3]") is a fallback.
-2. **`claude agents` / `claude stop`.** `claude agents --json` gives `[{ pid, cwd, kind, startedAt, sessionId, name, status }]` and includes this session. `claude stop <id>` is documented for **background** sessions only, and every live session right now is `interactive`. **Undecided:** Stop for interactive sessions would mean signalling the pid (the person's own terminal session).
+2. **`claude agents` / `claude stop`.** `claude agents --json` gives `[{ pid, cwd, kind, startedAt, sessionId, name, status }]` and includes this session. `claude stop <id>` is for **background** sessions only. **Verified 2026-11-06 with a throwaway `claude --bg` session:** background rows carry a short `id` (`06853d63`); `claude stop 06853d63` printed `stopped 06853d63` and the row left the list, while the full `sessionId` gave "No job matching". Interactive rows have no `id`. **Decided:** Stop only for background sessions; interactive rows show status and nothing to press.
 3. **The post box.** `Input` (`key`, `onSubmit(value)`, optional `rows`) is in all four surface tables: terminal, desktop, vscode, mobile.
 4. **Retention.** Proposed: keep forever, since the files are tiny. Pruning would have to clear `uappnd` on the folder and the file first.
 5. **Who reads a mention.** Proposed: leave `crossSessionInbound` alone. It is a global setting covering all cross-session messages, and it is not in the mod API types.
@@ -93,7 +93,7 @@ huddle/
 3. ✅ The guard hook and `uappnd`.
 4. ✅ @mention delivery through `$.session.send`.
 5. ✅ The panel: feed and post box.
-6. The panel's session list and Stop button, after open question 2 is settled.
+6. ✅ The panel's session list and Stop button.
 
 ## Developing it
 

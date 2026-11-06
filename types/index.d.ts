@@ -8,14 +8,29 @@ export type Feed = {
   mtimeMs: number
 }
 
+/** A running local session as the panel lists it. */
+export type Peer = {
+  sessionId: string
+  name: string
+  kind?: string
+  status?: string
+  /** The short id `claude stop` takes; background sessions only. */
+  id?: string
+  startedAt?: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     huddle: {
       feed: Shaped<Feed>
       /** What the post box holds, so it can be cleared after a post. */
       draft: string
-      /** One dim line under the feed: what went wrong with the last post. */
+      /** One dim line under the feed: what went wrong with the last post or stop. */
       notice: string
+      /** The running sessions, this one included. */
+      peers: Shaped<Peer[]>
+      /** Whether the session list is expanded. */
+      showPeers: boolean
     }
   }
 }

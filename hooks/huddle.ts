@@ -108,7 +108,17 @@ export async function tailFile(run: Run, file: string, n: number): Promise<strin
 }
 
 /** One row of `claude agents --json`, the fields huddle reads. */
-export type SessionRow = { sessionId: string; name: string; kind?: string; status?: string }
+export type SessionRow = {
+  sessionId: string
+  name: string
+  /** `interactive` or `background`. */
+  kind?: string
+  /** `idle` or `busy`. */
+  status?: string
+  /** The short id `claude stop` takes; background sessions only. */
+  id?: string
+  startedAt?: number
+}
 
 /** Names that mention no session: `@you` is the person. */
 const NOT_SESSIONS = new Set(['you'])

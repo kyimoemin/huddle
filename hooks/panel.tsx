@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { On, Timer } from 'claude-code'
-import type { Feed } from '../types'
+import type { Feed, Peer } from '../types'
 import { dayFile, localDay, tailFile } from './huddle.ts'
-import { type $, channelDir, deliverMentions, errorText, post, runner } from './channel.ts'
+import { type $, channelDir, deliverMentions, errorText, forgetSessions, post, runner, sessions } from './channel.ts'
 
 export const PANE = 'huddle'
 const TITLE = '#huddle'
@@ -10,6 +10,8 @@ const POLL_MS = 2000
 const FEED_LINES = 200
 /** Rows the pane keeps below the feed: the notice and the post box. */
 const BELOW_FEED = 3
+/** The session list's header row. */
+const HEADER_ROWS = 1
 
 // Change the tag when Feed's fields change: a value an earlier version stored
 // outlives a reload, and the tag makes this code read it as the initial value.
@@ -18,6 +20,55 @@ const feed = atom({ plugin: 'huddle', key: 'feed' } as const, { day: '', lines: 
 })
 const draft = atom({ plugin: 'huddle', key: 'draft' } as const, '')
 const notice = atom({ plugin: 'huddle', key: 'notice' } as const, '')
+const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-1' })
+const showPeers = atom({ plugin: 'huddle', key: 'showPeers' } as const, false)
+
+/** Background sessions first (the ones Stop applies to), then newest first. */
+export function sortPeers(rows: readonly Peer[]): Peer[] {
+  const isBg = (row: Peer) => (row.kind === 'background' ? 0 : 1)
+  return [...rows].sort((a, b) => isBg(a) - isBg(b) || (b.startedAt ?? 0) - (a.startedAt ?? 0))
+}
+
+/** How long ago, in the largest whole unit: `45s`, `12m`, `3h`, `7d`. */
+export function ago(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  if (s < 86_400) return `${Math.floor(s / 3600)}h`
+  return `${Math.floor(s / 86_400)}d`
+}
+
+/** Re-reads the session list (cached 10s), writing it only when a row changed. */
+export async function refreshPeers($: $): Promise<void> {
+  let rows: Peer[]
+  try {
+    rows = sortPeers(
+      (await sessions($)).map(({ sessionId, name, kind, status, id, startedAt }) => ({ sessionId, name, kind, status, id, startedAt })),
+    )
+  } catch {
+    return
+  }
+  const current = await read($, peers)
+  if (JSON.stringify(current) !== JSON.stringify(rows)) await update($, peers, () => rows)
+}
+
+/**
+ * Stops a background session with `claude stop <id>`; its conversation is
+ * kept (`claude attach <id>` resumes it). Interactive sessions have no id
+ * and are never stopped from here.
+ */
+export async function stopPeer($: $, peer: Peer): Promise<void> {
+  if (peer.kind !== 'background' || !peer.id) return
+  const { exitCode, stdout, stderr } = await $.process.run(['claude', 'stop', peer.id], { timeoutMs: 15_000 })
+  if (exitCode === 0) {
+    await update($, notice, () => '')
+    $.ui.toast(`Stopped ${peer.name}. Resume it with: claude attach ${peer.id}`)
+  } else {
+    await update($, notice, () => `Could not stop ${peer.name}: ${(stderr || stdout).trim()}`)
+  }
+  forgetSessions()
+  await refreshPeers($)
+}
 
 /**
  * Re-reads today's file when its mtime or the day changed since the feed was
@@ -53,12 +104,14 @@ function ensurePolling($: $): void {
         return
       }
       await refresh($)
+      await refreshPeers($)
     })().catch(() => {})
   })
 }
 
 async function openPane($: $): Promise<boolean> {
   await refresh($, true)
+  await refreshPeers($)
   const { isPlaced } = await $.ui.open({ id: PANE, title: TITLE })
   ensurePolling($)
   return isPlaced
@@ -112,6 +165,7 @@ export async function startPanel($: $): Promise<void> {
   // A reload keeps the pane up but drops timers: start polling again.
   if ((await $.ui.panes()).some((pane) => pane.id === PANE)) {
     await refresh($, true)
+    await refreshPeers($)
     ensurePolling($)
   }
 }
@@ -123,14 +177,45 @@ export function registerPanel(on: On): void {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Input } = $.ui.resolve(e)
+    const { Box, Text, Input, Button } = $.ui.resolve(e)
     const { lines } = await read($, feed)
     const typed = await read($, draft)
     const problem = await read($, notice)
-    const shown = fitLines(lines, Math.max(1, e.props.scroll.bodyRows - BELOW_FEED), e.props.bodyColumns)
+    const everyone = await read($, peers)
+    const isListOpen = await read($, showPeers)
+    const selfId = await $.session.id()
+    const now = Date.now()
+
+    const bodyRows = e.props.scroll.bodyRows
+    // The list takes at most half the pane; the rest is the feed's.
+    const listRoom = Math.max(1, Math.floor(bodyRows / 2) - HEADER_ROWS)
+    const listed = isListOpen ? everyone.slice(0, everyone.length > listRoom ? listRoom - 1 : listRoom) : []
+    const hidden = isListOpen ? everyone.length - listed.length : 0
+    const listRows = HEADER_ROWS + listed.length + (hidden > 0 ? 1 : 0)
+    const shown = fitLines(lines, Math.max(1, bodyRows - BELOW_FEED - listRows), e.props.bodyColumns)
+    const busy = everyone.filter((peer) => peer.status === 'busy').length
 
     return (
       <Box flexDirection="column">
+        <Button
+          key="peers"
+          plain
+          label={`${isListOpen ? '▾' : '▸'} Sessions: ${everyone.length}${busy > 0 ? `, ${busy} busy` : ''}`}
+          onPress={() => void update($, showPeers, (open) => !open)}
+        />
+        {listed.map((peer) => (
+          <Box flexDirection="row" gap={1}>
+            <Text bold={peer.sessionId === selfId}>{peer.name}</Text>
+            <Text dimColor>
+              {peer.sessionId === selfId ? 'this session' : peer.kind ?? 'session'} · {peer.status ?? '?'}
+              {peer.startedAt ? ` · ${ago(now - peer.startedAt)}` : ''}
+            </Text>
+            {peer.kind === 'background' && peer.id && peer.sessionId !== selfId && (
+              <Button key={`stop-${peer.id}`} label="stop" onPress={() => void stopPeer($, peer)} />
+            )}
+          </Box>
+        ))}
+        {hidden > 0 && <Text dimColor>+{hidden} more</Text>}
         <Box flexDirection="column" flexGrow={1}>
           {shown.length === 0 && <Text dimColor>No posts today. Write one below; @name mentions a session.</Text>}
           {shown.map((line) => {

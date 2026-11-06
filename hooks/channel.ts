@@ -42,6 +42,11 @@ export async function sessions($: $): Promise<SessionRow[]> {
   return rows
 }
 
+/** Drops the cached session list, so the next read runs `claude agents` again. */
+export function forgetSessions(): void {
+  cachedSessions = undefined
+}
+
 /** This session's name as ListAgents shows it; the folder name when that fails. */
 export async function ownName($: $): Promise<string> {
   try {
