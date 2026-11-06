@@ -30,6 +30,8 @@ function engine(
     if (e.argv[0] === 'claude') {
       const rows = [
         { sessionId: 'other', name: 'coachcard-1e' },
+        { sessionId: 'be-1', name: 'coachcard-be' },
+        { sessionId: 'be-2', name: 'coachcard-be' },
         { sessionId: 'sid', name: 'huddle-5a' },
       ]
       return { value: { exitCode: 0, stdout: JSON.stringify(rows), stderr: '', ...WHOLE } }
@@ -247,4 +249,65 @@ test('the guard protects ~/.claude/huddle even while HUDDLE_DIR points elsewhere
 
   expect(real.deny).toContain('runs rm on it')
   expect(test.deny).toContain('runs rm on it')
+})
+
+/** Records each message the mod sends; `refuse` names session ids that refuse. */
+function mailbox(on: On, refuse: readonly string[] = []) {
+  const sent: { to: string; text: string }[] = []
+  const toasts: string[] = []
+  on('session.send', (_, e) => {
+    sent.push({ to: e.to, text: e.text })
+    return refuse.some((id) => e.to.includes(id))
+      ? { isDelivered: false, reason: 'recipient gone' }
+      : { isDelivered: true }
+  })
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  return { sent, toasts }
+}
+
+test('a post @mentioning sessions messages each of them, a shared name each holder', async ($, on) => {
+  const { runs } = engine(on)
+  const { sent, toasts } = mailbox(on)
+  await $.session.start(START)
+
+  const done = await $.tool.call({ tool: POST_TOOL, text: '@coachcard-1e and @coachcard-be: QA is green' })
+
+  expect(sent.length).toBe(3)
+  expect(sent.every((m) => m.text.startsWith('You were mentioned in #huddle by huddle-5a:'))).toBe(true)
+  expect(sent.every((m) => m.text.includes('**huddle-5a**: @coachcard-1e and @coachcard-be: QA is green'))).toBe(true)
+  expect(String(done.result)).toContain('Mentions: notified @coachcard-1e, @coachcard-be')
+  expect(toasts).toEqual([])
+  // One sessions lookup serves both the author's name and the mentions.
+  expect(runs.filter((argv) => argv[0] === 'claude').length).toBe(1)
+})
+
+test('an unknown name or a refused delivery is reported and toasted; the post still stands', async ($, on) => {
+  const { runs } = engine(on)
+  const { sent, toasts } = mailbox(on, ['other'])
+  await $.session.start(START)
+
+  const done = await $.tool.call({ tool: POST_TOOL, text: '@ghost @coachcard-1e @huddle-5a @you hi' })
+
+  expect(runs.some((argv) => argv[0] === '/bin/sh')).toBe(true)
+  expect(done.deny).toBeUndefined()
+  expect(sent.length).toBe(1)
+  const result = String(done.result)
+  expect(result).toContain('@ghost: no running session has that name')
+  expect(result).toContain('@coachcard-1e (recipient gone): not delivered')
+  expect(toasts.length).toBe(1)
+  expect(toasts[0]).toContain('@ghost')
+})
+
+test('a post with no mentions sends nothing', async ($, on) => {
+  engine(on)
+  const { sent } = mailbox(on)
+  await $.session.start(START)
+
+  const done = await $.tool.call({ tool: POST_TOOL, text: 'mail me@example.com' })
+
+  expect(sent).toEqual([])
+  expect(String(done.result)).not.toContain('Mentions')
 })

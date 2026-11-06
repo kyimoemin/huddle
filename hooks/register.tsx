@@ -5,7 +5,12 @@ import {
   formatEntry,
   huddleDir,
   localDay,
+  mentionMessage,
+  parseMentions,
+  parseSessions,
   previousDayFile,
+  resolveMentions,
+  type SessionRow,
   tailFile,
   type Run,
 } from './huddle.ts'
@@ -17,7 +22,7 @@ const SECTION_ID = 'huddle:channel'
 
 const DEFAULT_TAIL = 50
 const MAX_TAIL = 200
-const NAME_TTL_MS = 60_000
+const SESSIONS_TTL_MS = 10_000
 
 export const SECTION_TEXT = [
   '# huddle',
@@ -31,30 +36,70 @@ type $ = EngineInterface
 
 const runner = ($: $): Run => (argv) => $.process.run(argv)
 
-let cachedName: { name: string; at: number } | undefined
+let cachedSessions: { rows: SessionRow[]; at: number } | undefined
 
 /**
- * This session's name as ListAgents shows it: its id looked up in
- * `claude agents --json`. Falls back to the folder name. Cached briefly,
- * since names can change and one post should not cost a process each time.
+ * The running local sessions, from `claude agents --json`. Cached briefly so
+ * a post costs at most one process; names change and repeat, so not for long.
  */
-async function ownName($: $): Promise<string> {
+async function sessions($: $): Promise<SessionRow[]> {
   const now = Date.now()
-  if (cachedName && now - cachedName.at < NAME_TTL_MS) return cachedName.name
-  let name: string | undefined
+  if (cachedSessions && now - cachedSessions.at < SESSIONS_TTL_MS) return cachedSessions.rows
+  const { exitCode, stdout, stderr } = await $.process.run(['claude', 'agents', '--json'], { timeoutMs: 10_000 })
+  if (exitCode !== 0) throw new Error(`claude agents failed: ${stderr.trim()}`)
+  const rows = parseSessions(stdout)
+  cachedSessions = { rows, at: now }
+  return rows
+}
+
+/** This session's name as ListAgents shows it; the folder name when that fails. */
+async function ownName($: $): Promise<string> {
   try {
     const id = await $.session.id()
-    const { exitCode, stdout } = await $.process.run(['claude', 'agents', '--json'], { timeoutMs: 10_000 })
-    if (exitCode === 0) {
-      const rows = JSON.parse(stdout) as { sessionId?: string; name?: string }[]
-      name = rows.find((row) => row.sessionId === id)?.name || undefined
-    }
+    const name = (await sessions($)).find((row) => row.sessionId === id)?.name
+    if (name) return name
   } catch {
     // Fall through to the folder name.
   }
-  name ??= (await $.session.cwd()).split('/').filter(Boolean).at(-1) ?? 'session'
-  cachedName = { name, at: now }
-  return name
+  return (await $.session.cwd()).split('/').filter(Boolean).at(-1) ?? 'session'
+}
+
+/**
+ * Sends each session a post @mentions a message saying so, and toasts what
+ * did not reach anyone. Returns one line for the poster; empty with no mentions.
+ */
+async function deliverMentions($: $, author: string, text: string, line: string): Promise<string> {
+  const names = parseMentions(text)
+  if (names.length === 0) return ''
+  let rows: SessionRow[]
+  try {
+    rows = await sessions($)
+  } catch (error) {
+    const problem = `huddle: mentions not delivered: ${errorText(error)}`
+    $.ui.toast(problem)
+    return problem
+  }
+  const { targets, unknown } = resolveMentions(names, rows, await $.session.id())
+  const message = mentionMessage(author, line)
+  const sent = await Promise.all(
+    targets.map(async (target) => {
+      try {
+        const { isDelivered, reason } = await $.session.send({ to: { sessionId: target.sessionId }, text: message })
+        return isDelivered ? { ...target, ok: true as const } : { ...target, ok: false as const, reason }
+      } catch (error) {
+        return { ...target, ok: false as const, reason: errorText(error) }
+      }
+    }),
+  )
+  const reached = sent.filter((s) => s.ok).map((s) => `@${s.name}`)
+  const failed = sent.filter((s) => !s.ok).map((s) => `@${s.name} (${s.reason})`)
+  const problems = [
+    ...unknown.map((name) => `@${name}: no running session has that name`),
+    ...failed.map((f) => `${f}: not delivered`),
+  ]
+  if (problems.length > 0) $.ui.toast(`huddle: ${problems.join('; ')}`)
+  const parts = [reached.length > 0 ? `notified ${[...new Set(reached)].join(', ')}` : '', ...problems].filter(Boolean)
+  return parts.join('; ')
 }
 
 /** The channel folder: `$HUDDLE_DIR` when set (for testing), else ~/.claude/huddle. */
@@ -174,8 +219,10 @@ export const register: Register = (on) => {
     const text = (e as { text?: unknown }).text
     if (typeof text !== 'string' || text.trim() === '') return { deny: 'huddle: text must be a non-empty string.' }
     try {
-      const line = await post($, await ownName($), text)
-      return { result: `Posted to #huddle: ${line}` }
+      const author = await ownName($)
+      const line = await post($, author, text)
+      const mentions = await deliverMentions($, author, text, line)
+      return { result: `Posted to #huddle: ${line}${mentions ? `\nMentions: ${mentions}` : ''}` }
     } catch (error) {
       return { deny: `huddle: the post was not saved: ${errorText(error)}` }
     }

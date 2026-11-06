@@ -8,6 +8,9 @@ import {
   formatEntry,
   huddleDir,
   lastLines,
+  mentionMessage,
+  parseSessions,
+  resolveMentions,
   parseMentions,
   previousDayFile,
   tailFile,
@@ -118,4 +121,38 @@ test('tailFile reads the last lines with tail, and nothing for a missing file', 
   expect(await tailFile(run, '/h/missing.md', 50)).toEqual([])
   expect(await tailFile(run, '/h/day.md', 0)).toEqual([])
   expect(calls.length).toBe(2)
+})
+
+const ROWS = [
+  { sessionId: 's1', name: 'coachcard-1e' },
+  { sessionId: 's2', name: 'coachcard-be' },
+  { sessionId: 's3', name: 'coachcard-be' },
+  { sessionId: 'me', name: 'huddle-5a' },
+]
+
+test('a mention reaches every session with that name, case-insensitively', () => {
+  expect(resolveMentions(['Coachcard-1E', 'coachcard-be'], ROWS, 'me')).toEqual({
+    targets: [
+      { name: 'coachcard-1e', sessionId: 's1' },
+      { name: 'coachcard-be', sessionId: 's2' },
+      { name: 'coachcard-be', sessionId: 's3' },
+    ],
+    unknown: [],
+  })
+})
+
+test('self and @you reach nobody and are not unknown; other names are', () => {
+  expect(resolveMentions(['huddle-5a', 'you', 'ghost'], ROWS, 'me')).toEqual({ targets: [], unknown: ['ghost'] })
+})
+
+test('the mention message names the author and carries the line', () => {
+  const text = mentionMessage('huddle-5a', '- 14:35 **huddle-5a**: @coachcard-1e which tests?')
+  expect(text.startsWith('You were mentioned in #huddle by huddle-5a:\n- 14:35')).toBe(true)
+  expect(text).toContain('mcp__huddle__post')
+})
+
+test('parseSessions keeps rows with a sessionId and a name', () => {
+  const out = JSON.stringify([{ sessionId: 'a', name: 'x', pid: 1 }, { sessionId: 'b' }, null, { name: 'y' }])
+  expect(parseSessions(out)).toEqual([{ sessionId: 'a', name: 'x', pid: 1 } as never])
+  expect(parseSessions('{}')).toEqual([])
 })

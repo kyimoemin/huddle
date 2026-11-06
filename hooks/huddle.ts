@@ -106,3 +106,48 @@ export async function tailFile(run: Run, file: string, n: number): Promise<strin
   const { exitCode, stdout } = await run(['/usr/bin/tail', '-n', String(n), file])
   return exitCode === 0 ? lastLines(stdout, n) : []
 }
+
+/** One row of `claude agents --json`, the fields huddle reads. */
+export type SessionRow = { sessionId: string; name: string; kind?: string; status?: string }
+
+/** Names that mention no session: `@you` is the person. */
+const NOT_SESSIONS = new Set(['you'])
+
+export type Mentions = {
+  /** Every session a mention reaches; a name several sessions share reaches each. */
+  targets: { name: string; sessionId: string }[]
+  /** Mentioned names no running session carries. */
+  unknown: string[]
+}
+
+/**
+ * Resolves mentioned names to running sessions, case-insensitively. This
+ * session (`selfId`) and `@you` are left out, neither reached nor unknown.
+ */
+export function resolveMentions(names: readonly string[], rows: readonly SessionRow[], selfId: string): Mentions {
+  const targets: Mentions['targets'] = []
+  const unknown: string[] = []
+  for (const name of names) {
+    const lower = name.toLowerCase()
+    if (NOT_SESSIONS.has(lower)) continue
+    const matches = rows.filter((row) => row.name.toLowerCase() === lower)
+    if (matches.length === 0) unknown.push(name)
+    for (const row of matches) if (row.sessionId !== selfId) targets.push({ name: row.name, sessionId: row.sessionId })
+  }
+  return { targets, unknown }
+}
+
+/** What a mentioned session receives. */
+export function mentionMessage(author: string, line: string): string {
+  return `You were mentioned in #huddle by ${cleanName(author)}:\n${line}\nRead the channel with mcp__huddle__read and reply with mcp__huddle__post if a reply is useful.`
+}
+
+/** Parses `claude agents --json` output into rows; malformed rows are dropped. */
+export function parseSessions(stdout: string): SessionRow[] {
+  const parsed: unknown = JSON.parse(stdout)
+  if (!Array.isArray(parsed)) return []
+  return parsed.filter(
+    (row): row is SessionRow =>
+      typeof row === 'object' && row !== null && typeof row.sessionId === 'string' && typeof row.name === 'string',
+  )
+}

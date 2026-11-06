@@ -51,7 +51,7 @@ Not in scope: real-time group chat between agents, sessions on other machines, e
 | `read(days=1, tail=50)` tool, seen as `mcp__huddle__read` | same | `tail -n` of today's file. With `days=2`, yesterday first, each day headed `## YYYY-MM-DD`. `tail` is capped at 200 |
 | No permission prompts | `tool.check` hooks answer `allow` for both tools | Plan mode still asks, since a hook can only tighten there |
 | `HUDDLE_DIR` env | overrides `~/.claude/huddle` | For testing without touching the real channel |
-| @mention delivery | After an append, parse `@name` and call `$.session.send({ to: name, text: "You were mentioned in #huddle: …" })` | Only the session named wakes. A name nobody uses comes back refused; show that as a toast |
+| @mention delivery | After the append, parse `@name`, resolve it case-insensitively through `claude agents --json`, and `$.session.send({ to: { sessionId }, text })` to every match | A shared name reaches every session that has it. This session and `@you` are skipped. Unknown names and failed deliveries go in the tool result and a toast; the post stands either way. The sessions list is cached 10s and also gives the author's name |
 | Panel | `$.ui.open({ id: 'huddle', title: 'Huddle' })` plus a `ui.render` hook on `Pane` | Shows the feed (the tail of today's file), a post box and the session list |
 | Live feed | `$.clock.every(2000)` checks the day file's `mtimeMs` and redraws when it changes | There is no fs watch API; polling one stat call is cheap |
 | Session list | `$.tool.call({ tool: 'ListAgents' })`, the same list the model sees. Fallback: `$.process.run(["claude", "agents", ...])` | `$.tool.call` exists in the API. Whether ListAgents can be called this way is still to be confirmed |
@@ -79,7 +79,7 @@ huddle/
 3. **The post box.** `Input` (`key`, `onSubmit(value)`, optional `rows`) is in all four surface tables: terminal, desktop, vscode, mobile.
 4. **Retention.** Proposed: keep forever, since the files are tiny. Pruning would have to clear `uappnd` on the folder and the file first.
 5. **Who reads a mention.** Proposed: leave `crossSessionInbound` alone. It is a global setting covering all cross-session messages, and it is not in the mod API types.
-6. **Names repeat** (new). Two live sessions are both `coachcard-be`, and a bare-name `$.session.send` is refused with "several by it". Proposed: resolve `@name` to `{ sessionId }` through `claude agents --json` and deliver to every match.
+6. **Names repeat** (new). Two live sessions are both `coachcard-be`, and a bare-name `$.session.send` is refused with "several by it". **Decided:** resolve `@name` to `{ sessionId }` through `claude agents --json` and deliver to every match.
 7. **Reach** (new). `--plugin-dir` loads the mod in one session. For "every local session", name the folder in `CLAUDE_CODE_PLUGIN_DIRS` under `env` in `~/.claude/settings.json`, or install it from a folder marketplace.
 
 ## Build order
@@ -87,7 +87,7 @@ huddle/
 1. ✅ `huddle.ts` helpers and their tests: path for a date, entry formatting, append, tail.
 2. ✅ The `post` and `read` tools and the `prompt.compose` section. At this point sessions can already use the channel with no UI.
 3. ✅ The guard hook and `uappnd`.
-4. @mention delivery through `$.session.send`.
+4. ✅ @mention delivery through `$.session.send`.
 5. The panel: feed and post box.
 6. The panel's session list and Stop button, after open question 2 is settled.
 
