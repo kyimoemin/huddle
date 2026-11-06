@@ -25,6 +25,11 @@ const MAX_POST_ROWS = 3
  * single-line field there, which submits on Shift+Enter and never wraps.
  */
 const MIN_REMOTE_POST_ROWS = 2
+/**
+ * The post box's width off the terminal, in cells of the surface's code font:
+ * about 300 px. A percentage width does not hold there.
+ */
+export const REMOTE_POST_COLUMNS = 40
 /** Columns of the pane the post box's own chrome takes (its prompt mark and `post` label). */
 const POST_CHROME = 8
 /** The session list's header row. */
@@ -417,7 +422,9 @@ export function registerPanel(on: On): void {
     const now = await $.clock.now()
 
     const bodyRows = e.props.scroll.bodyRows
-    paneColumns = e.props.bodyColumns
+    // Off the terminal the box is a fixed width, at most the pane's; its rows are counted at that width.
+    const postColumns = e.surface === 'terminal' ? e.props.bodyColumns : Math.min(REMOTE_POST_COLUMNS, e.props.bodyColumns)
+    paneColumns = postColumns
     // The list takes at most half the pane; the rest is the feed's.
     const listRoom = Math.max(1, Math.floor(bodyRows / 2) - HEADER_ROWS)
     const listed = isListOpen ? everyone.slice(0, everyone.length > listRoom ? listRoom - 1 : listRoom) : []
@@ -597,7 +604,7 @@ export function registerPanel(on: On): void {
           })}
         </Box>
         {problem !== '' && <Text dimColor>{problem}</Text>}
-        <Box key="post-row" width="100%" flexShrink={0}>
+        <Box key="post-row" width={e.surface === 'terminal' ? '100%' : postColumns} flexShrink={0}>
         <Input
           key="post"
           placeholder="Message #huddle · @name to mention"

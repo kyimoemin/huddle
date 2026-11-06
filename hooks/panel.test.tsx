@@ -710,3 +710,19 @@ test('a long post shows its first rows and opens with more', async ($, on) => {
   expect((await ui.find({ key: 'more-0' }))?.props.label).toBe('less')
   await ui.unmount()
 })
+
+test('the post box spans the terminal pane and is about 300 px elsewhere', async ($, on) => {
+  world(on)
+  await $.session.start(START)
+  await $.command.run(HUDDLE)
+  for (const [surface, width] of [['terminal', '100%'], ['vscode', 40], ['desktop', 40]] as const) {
+    const ui = await $.ui.mount(PANE(surface))
+    expect((await ui.find({ key: 'post-row' }))?.props.width).toBe(width)
+    await ui.unmount()
+  }
+  // A pane narrower than that gets a box its own width.
+  const pane = PANE('vscode')
+  const narrow = await $.ui.mount({ ...pane, props: { ...pane.props, bodyColumns: 30 } })
+  expect((await narrow.find({ key: 'post-row' }))?.props.width).toBe(30)
+  await narrow.unmount()
+})
