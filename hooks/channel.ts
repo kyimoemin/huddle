@@ -16,6 +16,7 @@ import {
   tailFile,
   type Run,
 } from './huddle'
+import { absolute } from './guard'
 
 /** The channel's operations on the engine, shared by the tools and the panel. */
 
@@ -164,11 +165,20 @@ export async function deliverMentions($: $, author: string, text: string, line: 
 /** The channel folder: `$HUDDLE_DIR` when set (for testing), else ~/.claude/huddle. */
 export async function channelDir($: $): Promise<string> {
   const override = await $.env.get('HUDDLE_DIR')
-  if (override) return override
   const home = await $.env.get('HOME')
+  if (override) {
+    // A relative one is taken from where the session was when first asked, and
+    // kept, so the channel and the guard stay on one folder as the cwd moves.
+    if (resolvedOverride?.raw !== override) {
+      resolvedOverride = { raw: override, dir: absolute(override, await $.session.cwd(), home ?? '') }
+    }
+    return resolvedOverride.dir
+  }
   if (!home) throw new Error('huddle: HOME is not set')
   return huddleDir(home)
 }
+
+let resolvedOverride: { raw: string; dir: string } | undefined
 
 /** Posts one entry to today's file; returns the line written. */
 export async function post($: $, name: string, text: string, at = new Date()): Promise<string> {
@@ -197,3 +207,84 @@ export async function read($: $, days: number, tail: number, at = new Date()): P
 
 export const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
+
+/**
+ * Where each session with huddle loaded keeps its context fill, one
+ * `<sessionId>.json` per session: beside the channel folder, not in it, so
+ * the append-only rule does not cover it.
+ */
+export async function contextDir($: $): Promise<string> {
+  const channel = (await channelDir($)).replace(/\/+$/, '')
+  return `${channel.slice(0, channel.lastIndexOf('/'))}/huddle-context`
+}
+
+const isFileSafe = (id: string) => /^[\w-]+$/.test(id)
+
+/** Writes this session's context fill, a whole percentage, for every panel to read. */
+export async function publishContext($: $, percent: number): Promise<void> {
+  const id = await $.session.id()
+  if (!isFileSafe(id)) return
+  await $.fs.write(`${await contextDir($)}/${id}.json`, JSON.stringify({ percent: Math.round(percent), at: Date.now() }))
+}
+
+/** Removes an ending session's context file. Best effort. */
+export async function unpublishContext($: $, id: string): Promise<void> {
+  if (!isFileSafe(id)) return
+  await $.process.run(['/bin/rm', '-f', `${await contextDir($)}/${id}.json`], { timeoutMs: 2000 })
+}
+
+const fills = new Map<string, { mtimeMs: number; percent: number | undefined }>()
+/** How often, and past what age, the files of sessions no longer running are removed. */
+const SWEEP_MS = 60 * 60_000
+const STALE_MS = 24 * 60 * 60_000
+let lastSweep = 0
+
+/**
+ * Each listed session's context fill, by session id, from the files the
+ * sessions write. One listing per call; a file is read again only when its
+ * mtime moved. A session without huddle loaded has no file, so no figure.
+ */
+export async function contextFills($: $, sessionIds: readonly string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  const dir = await contextDir($)
+  let entries: { name: string; mtimeMs: number }[]
+  try {
+    entries = await $.fs.list(dir)
+  } catch {
+    return out
+  }
+  const mtimes = new Map(entries.map((entry) => [entry.name, entry.mtimeMs]))
+  const listed = new Set(sessionIds.map((id) => `${id}.json`))
+  // Forget what is no longer listed, and once in a while remove the files of
+  // sessions that ended without removing their own (a crash, a kill).
+  for (const name of fills.keys()) if (!listed.has(name)) fills.delete(name)
+  if (sessionIds.length > 0 && !sessionIds.some((id) => id.startsWith('ref:')) && Date.now() - lastSweep > SWEEP_MS) {
+    lastSweep = Date.now()
+    const stale = entries.filter(
+      (entry) => entry.name.endsWith('.json') && !listed.has(entry.name) && Date.now() - entry.mtimeMs > STALE_MS,
+    )
+    if (stale.length > 0) {
+      void $.process.run(['/bin/rm', '-f', ...stale.map((entry) => `${dir}/${entry.name}`)], { timeoutMs: 5000 }).catch(() => {})
+    }
+  }
+  for (const id of sessionIds) {
+    const name = `${id}.json`
+    const mtimeMs = mtimes.get(name)
+    if (mtimeMs === undefined) continue
+    let known = fills.get(name)
+    if (known?.mtimeMs !== mtimeMs) {
+      let percent: number | undefined
+      try {
+        const value = (JSON.parse(String(await $.fs.read(`${dir}/${name}`))) as { percent?: unknown }).percent
+        if (typeof value === 'number' && Number.isFinite(value)) percent = Math.min(100, Math.max(0, Math.round(value)))
+      } catch {
+        // Half-written or not ours: no figure this time.
+      }
+      known = { mtimeMs, percent }
+      // A failed read is tried again next time.
+      if (percent !== undefined) fills.set(name, known)
+    }
+    if (known.percent !== undefined) out.set(id, known.percent)
+  }
+  return out
+}

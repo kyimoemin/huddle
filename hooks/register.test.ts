@@ -18,7 +18,7 @@ function engine(
    * `CLAUDE_CODE_EXECPATH`: a path holding `broken` does not start, one holding
    * `/old/` starts and fails; `claude` itself does not start with `noCli`.
    */
-  cli: { execPath?: string; noCli?: boolean } = {},
+  cli: { execPath?: string; noCli?: boolean; cwd?: () => string } = {},
 ) {
   const runs: (readonly string[])[] = []
   const registered: string[] = []
@@ -32,9 +32,11 @@ function engine(
       e.name === 'HOME' ? '/h' : e.name === 'HUDDLE_DIR' ? huddleDirEnv : e.name === 'CLAUDE_CODE_EXECPATH' ? cli.execPath : undefined,
   }))
   on('session.id', () => ({ value: 'sid' }))
-  on('session.cwd', () => ({ value: '/Users/me/Projects/huddle' }))
+  on('session.cwd', () => ({ value: cli.cwd?.() ?? '/Users/me/Projects/huddle' }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('ui.panes', () => ({ value: [] }))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  on('session.end', () => ({ sessionId: 'sid' }))
   on('process.run', (_, e) => {
     runs.push(e.argv)
     const isCli = e.argv[0] === 'claude' || (cli.execPath !== undefined && e.argv[0] === cli.execPath)
@@ -91,6 +93,21 @@ test('HUDDLE_DIR moves the channel', async ($, on) => {
   const [, , , , , file, dir] = runs.find((argv) => argv[0] === '/bin/sh')!
   expect(file).toMatch(/^\/tmp\/chan\/\d{4}-\d\d-\d\d\.md$/)
   expect(dir).toBe('/tmp/chan')
+})
+
+test('a relative HUDDLE_DIR is taken from the working directory, the context files beside it', async ($, on) => {
+  const { runs } = engine(on, undefined, 'scratch/chan')
+  const paths: string[] = []
+  on('fs.write', (_, e) => {
+    paths.push(e.path)
+    return { value: undefined }
+  })
+  await $.session.start(START)
+  await $.tool.call({ tool: POST_TOOL, text: 'hi' })
+  await $.session.measure({ context: { window: 200_000, percent: 3 }, rateLimits: [], changed: ['context'] })
+
+  expect(runs.find((argv) => argv[0] === '/bin/sh')![6]).toBe('/Users/me/Projects/huddle/scratch/chan')
+  expect(paths).toEqual(['/Users/me/Projects/huddle/scratch/huddle-context/sid.json'])
 })
 
 test('post refuses empty text without writing', async ($, on) => {
@@ -405,4 +422,55 @@ test("a bundled binary that runs but fails is retried as claude on the PATH", as
 
   expect(String(done.result)).toContain('**huddle-5a**')
   expect(runs.filter((argv) => argv[1] === 'agents').map((argv) => argv[0])).toEqual(['/old/claude', 'claude'])
+})
+
+test("each turn's context fill is written for the panels; the session's end removes it", async ($, on) => {
+  const { runs } = engine(on)
+  const writes: { path: string; text: string }[] = []
+  on('fs.write', (_, e) => {
+    writes.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000, percent: 12 }, rateLimits: [] } }))
+  await $.session.start({ cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true })
+  // A resumed session reports what it already holds.
+  expect(writes.map((w) => w.path)).toEqual(['/h/.claude/huddle-context/sid.json'])
+  expect(JSON.parse(writes[0]!.text).percent).toBe(12)
+
+  await $.session.measure({ context: { window: 200_000, tokens: 84_600, percent: 42.3 }, rateLimits: [], changed: ['context'] })
+  expect(JSON.parse(writes.at(-1)!.text).percent).toBe(42)
+  // A cost-only measurement leaves the file alone.
+  await $.session.measure({ context: { window: 200_000, percent: 42 }, rateLimits: [], changed: ['cost'] })
+  expect(writes).toHaveLength(2)
+
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 'sid', resume: { id: 'sid' } })
+  expect(runs.at(-1)).toEqual(['/bin/rm', '-f', '/h/.claude/huddle-context/sid.json'])
+})
+
+test('with HUDDLE_DIR set, the context files sit beside it', async ($, on) => {
+  engine(on, undefined, '/tmp/scratch/chan')
+  const paths: string[] = []
+  on('fs.write', (_, e) => {
+    paths.push(e.path)
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true })
+  await $.session.measure({ context: { window: 200_000, percent: 7 }, rateLimits: [], changed: ['context'] })
+  expect(paths).toEqual(['/tmp/scratch/huddle-context/sid.json'])
+})
+
+test('a relative HUDDLE_DIR stays on the first folder as the cwd moves, and the guard with it', async ($, on) => {
+  let cwd = '/p'
+  const { runs } = engine(on, undefined, 'scratch/chan', { cwd: () => cwd })
+  on('fs.stat', (_, e) => ({ deny: `ENOENT: ${e.path}` }))
+  await $.session.start({ cwd, surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: POST_TOOL, text: 'one' })
+  cwd = '/q'
+  await $.tool.call({ tool: POST_TOOL, text: 'two' })
+
+  const dirs = runs.filter((argv) => argv[0] === '/bin/sh').map((argv) => argv[6])
+  expect(dirs).toEqual(['/p/scratch/chan', '/p/scratch/chan'])
+  // From /q, the guard still guards /p/scratch/chan, and not /q's.
+  const write = await $.tool.call({ tool: 'Write', file_path: '/p/scratch/chan/x.md', content: 'forged' })
+  expect(write.deny).toContain('append-only')
 })

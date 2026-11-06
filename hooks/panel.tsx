@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { On, Timer } from 'claude-code'
 import type { Feed, Peer } from '../types'
 import { dayFile, localDay, tailFile } from './huddle'
-import { type $, channelDir, deliverMentions, errorText, forgetSessions, post, runClaude, runner, sessions } from './channel'
+import { type $, channelDir, contextFills, deliverMentions, errorText, forgetSessions, post, runClaude, runner, sessions } from './channel'
 
 export const PANE = 'huddle'
 const TITLE = '#huddle'
@@ -20,7 +20,7 @@ const feed = atom({ plugin: 'huddle', key: 'feed' } as const, { day: '', lines: 
 })
 const draft = atom({ plugin: 'huddle', key: 'draft' } as const, '')
 const notice = atom({ plugin: 'huddle', key: 'notice' } as const, '')
-const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-1' })
+const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-2' })
 const showPeers = atom({ plugin: 'huddle', key: 'showPeers' } as const, false)
 
 /** Background sessions first (the ones Stop applies to), then newest first. */
@@ -38,12 +38,29 @@ export function ago(ms: number): string {
   return `${Math.floor(s / 86_400)}d`
 }
 
-/** Re-reads the session list (cached 10s), writing it only when a row changed. */
+/** Context fill at which a row's figure turns to the warning color. */
+const CONTEXT_WARN = 80
+
+/**
+ * Re-reads the session list (cached 10s) and each session's context fill,
+ * writing them only when a row changed.
+ */
 export async function refreshPeers($: $): Promise<void> {
   let rows: Peer[]
   try {
+    const listed = await sessions($)
+    // The list stands without the figures.
+    const context = await contextFills($, listed.map((row) => row.sessionId)).catch(() => new Map<string, number>())
     rows = sortPeers(
-      (await sessions($)).map(({ sessionId, name, kind, status, id, startedAt }) => ({ sessionId, name, kind, status, id, startedAt })),
+      listed.map(({ sessionId, name, kind, status, id, startedAt }) => ({
+        sessionId,
+        name,
+        kind,
+        status,
+        id,
+        startedAt,
+        context: context.get(sessionId),
+      })),
     )
   } catch {
     return
@@ -216,6 +233,11 @@ export function registerPanel(on: On): void {
               {peer.sessionId === selfId ? 'this session' : peer.kind ?? 'session'} · {peer.status ?? '?'}
               {peer.startedAt ? ` · ${ago(now - peer.startedAt)}` : ''}
             </Text>
+            {peer.context !== undefined && (
+              <Text dimColor={peer.context < CONTEXT_WARN} color={peer.context >= CONTEXT_WARN ? 'warning' : undefined}>
+                {peer.context}% context
+              </Text>
+            )}
             {peer.kind === 'background' && peer.id && peer.sessionId !== selfId && (
               <Button key={`stop-${peer.id}`} label="stop" onPress={() => void stopPeer($, peer)} />
             )}
