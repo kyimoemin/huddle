@@ -22,8 +22,15 @@ const BELOW_FEED = 3
 const MAX_POST_ROWS = 3
 /** Columns of the pane the post box's own chrome takes (its prompt mark and `post` label). */
 const POST_CHROME = 8
-/** The session list's header row. */
+/** The session list's header row, and the divider and day header under the list. */
 const HEADER_ROWS = 1
+const DIVIDER_ROWS = 2
+/** Rows a long post shows until opened, plus its `more` row. */
+const COLLAPSED_ROWS = 3
+/** How long a notice stays under the feed. */
+const NOTICE_MS = 30_000
+/** Author colours: one per name, the same in every panel. */
+const AUTHOR_COLORS = ['#e07a5f', '#81b29a', '#e9c46a', '#7aa2f7', '#bb9af7', '#7dcfff', '#ff9e64', '#9ece6a']
 
 // Change the tag when Feed's fields change: a value an earlier version stored
 // outlives a reload, and the tag makes this code read it as the initial value.
@@ -35,6 +42,7 @@ const typing = atom({ plugin: 'huddle', key: 'typing' } as const, '')
 const postRows = atom({ plugin: 'huddle', key: 'postRows' } as const, 1)
 const notice = atom({ plugin: 'huddle', key: 'notice' } as const, '')
 const peers = atom({ plugin: 'huddle', key: 'peers' } as const, [] as Peer[], { shape: 'peers-5' })
+const expanded = atom({ plugin: 'huddle', key: 'expanded' } as const, [] as string[])
 const showPeers = atom({ plugin: 'huddle', key: 'showPeers' } as const, true)
 
 /** Background sessions first (the ones Stop applies to), then newest first. */
@@ -179,7 +187,7 @@ export async function stopPeer($: $, peer: Peer): Promise<void> {
     await update($, notice, () => '')
     $.ui.toast(`Stopped ${peer.name}. Resume it with: claude attach ${peer.id}`)
   } else {
-    await update($, notice, () => `Could not stop ${peer.name}: ${(stderr || stdout).trim()}`)
+    await say($, `Could not stop ${peer.name}: ${(stderr || stdout).trim()}`)
   }
   forgetSessions()
   await refreshPeers($)
@@ -274,6 +282,32 @@ async function setPostBox($: $, text: string): Promise<void> {
   await noteTyping($, text)
 }
 
+/** Shows one line under the feed, which clears itself after NOTICE_MS unless replaced. */
+async function say($: $, text: string): Promise<void> {
+  await update($, notice, () => text)
+  if (text === '') return
+  $.clock.after(NOTICE_MS, () => {
+    void update($, notice, (shown) => (shown === text ? '' : shown)).catch(() => {})
+  })
+}
+
+/**
+ * The notice for a post's undelivered mentions: one short line naming them
+ * (`⚠ @a, @b not notified`); the full reasons went to a toast.
+ */
+export function mentionNotice(problems: readonly string[]): string {
+  if (problems.length === 0) return ''
+  const names = [...new Set(problems.flatMap((problem) => /^@[^\s:(]+/.exec(problem)?.[0] ?? []))]
+  return names.length > 0 ? `⚠ ${names.join(', ')} not notified` : '⚠ mentions not delivered'
+}
+
+/** An author's colour, fixed by name. */
+export function authorColor(name: string): string {
+  let hash = 0
+  for (const ch of name) hash = (hash * 31 + ch.codePointAt(0)!) >>> 0
+  return AUTHOR_COLORS[hash % AUTHOR_COLORS.length]!
+}
+
 /** Posts what the person typed, signed `you`, and delivers its mentions. */
 export async function submit($: $, text: string): Promise<void> {
   if (text.trim() === '') return
@@ -282,10 +316,10 @@ export async function submit($: $, text: string): Promise<void> {
     const line = await post($, 'you', text)
     const mentions = await deliverMentions($, 'you', text, line, true)
     const problems = mentions.split('; ').filter((part) => part !== '' && !part.startsWith('notified '))
-    await update($, notice, () => problems.join('; '))
+    await say($, mentionNotice(problems))
   } catch (error) {
     await setPostBox($, text)
-    await update($, notice, () => `Not posted: ${errorText(error)}`)
+    await say($, `Not posted: ${errorText(error)}`)
   }
   await refresh($, true)
 }
@@ -302,13 +336,14 @@ export function parseRow(line: string): Row {
  * The newest lines that fit `rows` rows `columns` wide, oldest first; each
  * line counts the rows it wraps to.
  */
-export function fitLines(lines: readonly string[], rows: number, columns: number): string[] {
+export function fitLines(lines: readonly string[], rows: number, columns: number, isOpen: (line: string) => boolean = () => true): string[] {
   const width = Math.max(1, columns)
   const kept: string[] = []
   let used = 0
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!
-    const cost = Math.max(1, Math.ceil([...line].length / width))
+    const wraps = Math.max(1, Math.ceil([...line].length / width))
+    const cost = wraps > COLLAPSED_ROWS && !isOpen(line) ? COLLAPSED_ROWS + 1 : wraps
     if (used + cost > rows && kept.length > 0) break
     kept.unshift(line)
     used += cost
@@ -345,6 +380,7 @@ export function registerPanel(on: On): void {
     const problem = await read($, notice)
     const everyone = await read($, peers)
     const isListOpen = await read($, showPeers)
+    const opened = new Set(await read($, expanded))
     const selfId = await $.session.id()
     const now = await $.clock.now()
 
@@ -354,8 +390,9 @@ export function registerPanel(on: On): void {
     const listRoom = Math.max(1, Math.floor(bodyRows / 2) - HEADER_ROWS)
     const listed = isListOpen ? everyone.slice(0, everyone.length > listRoom ? listRoom - 1 : listRoom) : []
     const hidden = isListOpen ? everyone.length - listed.length : 0
-    const listRows = HEADER_ROWS + listed.length + (hidden > 0 ? 1 : 0)
-    const shown = fitLines(lines, Math.max(1, bodyRows - BELOW_FEED - (rows - 1) - listRows), e.props.bodyColumns)
+    const listRows = HEADER_ROWS + listed.length + (hidden > 0 ? 1 : 0) + DIVIDER_ROWS
+    const columns = e.props.bodyColumns
+    const shown = fitLines(lines, Math.max(1, bodyRows - BELOW_FEED - (rows - 1) - listRows), columns, (line) => opened.has(line))
     const busy = everyone.filter((peer) => peer.status === 'busy').length
     const talks = conversations(everyone, now)
     const header = [`Sessions ${everyone.length}`, busy > 0 ? `${busy} busy` : '', talks.size > 0 ? `${talks.size} talking` : '']
@@ -387,7 +424,7 @@ export function registerPanel(on: On): void {
                 label={sessionIcon(peer.sessionId)}
                 onPress={() =>
                   void focusPeer($, peer)
-                    .then((problem) => (problem ? update($, notice, () => problem) : undefined))
+                    .then((problem) => (problem ? say($, problem) : undefined))
                     .catch(() => {})
                 }
               />
@@ -395,15 +432,21 @@ export function registerPanel(on: On): void {
               <Button
                 key={`mention-${peer.sessionId}`}
                 plain
+                dimColor={!isBusy}
                 label={peer.name}
                 onPress={() =>
                   void (isMentionable(peer.name)
                     ? read($, typing).then((typed) => setPostBox($, addMention(typed, peer.name)))
-                    : update($, notice, () => `${peer.name} can't be @mentioned: a mention is letters, digits, . _ and -`))
+                    : say($, `${peer.name} can't be @mentioned: a mention is letters, digits, . _ and -`))
                 }
               />
+              {isSelf && (
+                <Text backgroundColor="suggestion" color="inverseText" size="caption">
+                  you
+                </Text>
+              )}
               <Text dimColor wrap="truncate">
-                {[isSelf ? 'this session' : '', peer.project ?? '', peer.kind === 'background' ? 'bg' : '']
+                {[peer.project ?? '', peer.kind === 'background' ? 'bg' : '']
                   .filter(Boolean)
                   .join(' · ')}
               </Text>
@@ -458,32 +501,69 @@ export function registerPanel(on: On): void {
           )
         })}
         {hidden > 0 && <Text dimColor>+{hidden} more</Text>}
+        <Text dimColor wrap="truncate">
+          {'─'.repeat(Math.max(1, columns))}
+        </Text>
+        <Text dimColor size="caption">
+          Today
+        </Text>
         <Box flexDirection="column" flexGrow={1}>
-          {shown.length === 0 && <Text dimColor>No posts today. Write one below; click a session to mention it.</Text>}
+          {shown.length === 0 && <Text dimColor>No posts today. Write one below; click a name to mention it.</Text>}
           {shown.map((line, i) => {
             const row = parseRow(line)
-            return 'raw' in row ? (
-              <Text key={`line-${i}`} wrap="wrap">{row.raw}</Text>
-            ) : (
-              <Text key={`line-${i}`} wrap="wrap">
-                <Text dimColor>{row.time}</Text> <Text bold>{[authorIcon(row.name, everyone), row.name].filter(Boolean).join(' ')}</Text>{' '}
-                {splitMentions(row.body).map((part, j) =>
-                  part.isMention ? (
-                    <Text key={`m-${j}`} color="suggestion" bold>
-                      {part.text}
-                    </Text>
-                  ) : (
-                    part.text
-                  ),
+            if ('raw' in row) {
+              return (
+                <Text key={`line-${i}`} wrap="wrap">
+                  {row.raw}
+                </Text>
+              )
+            }
+            const author = [authorIcon(row.name, everyone), row.name].filter(Boolean).join(' ')
+            const isLong = Math.ceil([...line].length / Math.max(1, columns)) > COLLAPSED_ROWS
+            const isOpen = opened.has(line)
+            // Collapsed, the body is cut to what COLLAPSED_ROWS rows hold beside the time and author.
+            const room = COLLAPSED_ROWS * Math.max(1, columns) - [...`${row.time} ${author} `].length - 1
+            const body = isLong && !isOpen ? `${[...row.body].slice(0, Math.max(0, room)).join('')}…` : row.body
+            return (
+              <Box key={`line-${i}`} flexDirection="column" marginBottom="sm">
+                <Text wrap="wrap">
+                  <Text dimColor size="caption">
+                    {row.time}
+                  </Text>{' '}
+                  <Text bold color={authorColor(row.name)}>
+                    {author}
+                  </Text>{' '}
+                  {splitMentions(body).map((part, j) =>
+                    part.isMention ? (
+                      <Text key={`m-${j}`} color="inverseText" backgroundColor="suggestion">
+                        {part.text}
+                      </Text>
+                    ) : (
+                      part.text
+                    ),
+                  )}
+                </Text>
+                {isLong && (
+                  <Button
+                    key={`more-${i}`}
+                    plain
+                    dimColor
+                    label={isOpen ? 'less' : 'more'}
+                    onPress={() =>
+                      void update($, expanded, (open) =>
+                        open.includes(line) ? open.filter((kept) => kept !== line) : [...open, line].slice(-50),
+                      )
+                    }
+                  />
                 )}
-              </Text>
+              </Box>
             )
           })}
         </Box>
         {problem !== '' && <Text dimColor>{problem}</Text>}
         <Input
           key="post"
-          placeholder="Post to #huddle; click a session or type @name to mention it"
+          placeholder="Message #huddle · @name to mention"
           value={typed}
           rows={rows}
           submitLabel="post"

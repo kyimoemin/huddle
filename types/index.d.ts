@@ -50,6 +50,8 @@ declare module 'claude-code' {
       notice: string
       /** The running sessions, this one included. */
       peers: Shaped<Peer[]>
+      /** The long posts opened past their first rows, by their line. */
+      expanded: string[]
       /** Whether the session list is expanded. */
       showPeers: boolean
     }
