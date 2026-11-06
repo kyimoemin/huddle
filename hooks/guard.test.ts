@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { absolute, bashRewriteReason, collapse, isInside, type Where } from './guard.ts'
+import { absolute, bashRewriteReason, collapse, isInside, type Where } from './guard'
 
 const WHERE: Where = { dirs: ['/Users/me/.claude/huddle'], cwd: '/Users/me/Projects/app', home: '/Users/me' }
 const INSIDE: Where = { ...WHERE, cwd: '/Users/me/.claude/huddle' }

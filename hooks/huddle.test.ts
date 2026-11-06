@@ -15,7 +15,7 @@ import {
   previousDayFile,
   tailFile,
   type Run,
-} from './huddle.ts'
+} from './huddle'
 
 /** A fake runner that records each argv and answers with `answer(argv)`. */
 function fakeRun(answer: (argv: readonly string[]) => { exitCode: number; stdout?: string; stderr?: string }) {

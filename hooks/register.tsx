@@ -1,8 +1,8 @@
 import type { Register } from 'claude-code'
-import { huddleDir } from './huddle.ts'
-import { absolute, bashRewriteReason, collapse, isInside, type Where } from './guard.ts'
-import { type $, deliverMentions, errorText, ownName, post, read } from './channel.ts'
-import { registerPanel, startPanel } from './panel.tsx'
+import { huddleDir } from './huddle'
+import { absolute, bashRewriteReason, collapse, isInside, type Where } from './guard'
+import { type $, deliverMentions, errorText, ownName, post, read } from './channel'
+import { registerPanel, startPanel } from './panel'
 
 // Literal so `claude plugin validate` can read the matchers that use them.
 export const POST_TOOL = 'mcp__huddle__post'

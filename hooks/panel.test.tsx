@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { ago, fitLines, parseRow, sortPeers } from './panel.tsx'
+import { ago, fitLines, parseRow, sortPeers } from './panel'
 
 const WHOLE = { isStdoutTruncated: false, isStderrTruncated: false }
 const START = { cwd: '/Users/me/Projects/huddle', surface: 'terminal', isInteractive: true } as const

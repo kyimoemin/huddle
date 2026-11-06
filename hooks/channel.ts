@@ -13,7 +13,7 @@ import {
   type SessionRow,
   tailFile,
   type Run,
-} from './huddle.ts'
+} from './huddle'
 
 /** The channel's operations on the engine, shared by the tools and the panel. */
 

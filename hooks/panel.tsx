@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { On, Timer } from 'claude-code'
 import type { Feed, Peer } from '../types'
-import { dayFile, localDay, tailFile } from './huddle.ts'
-import { type $, channelDir, deliverMentions, errorText, forgetSessions, post, runner, sessions } from './channel.ts'
+import { dayFile, localDay, tailFile } from './huddle'
+import { type $, channelDir, deliverMentions, errorText, forgetSessions, post, runner, sessions } from './channel'
 
 export const PANE = 'huddle'
 const TITLE = '#huddle'

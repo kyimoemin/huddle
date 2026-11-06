@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { POST_TOOL, READ_TOOL, SECTION_TEXT } from './register.tsx'
+import { POST_TOOL, READ_TOOL, SECTION_TEXT } from './register'
 
 const WHOLE = { isStdoutTruncated: false, isStderrTruncated: false }
 type Answer = { exitCode: number; stdout?: string; stderr?: string }
